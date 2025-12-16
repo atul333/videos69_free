@@ -65,9 +65,9 @@ DOWNLOADABLE_VIDEOS_LIMIT = 2
 # Number of videos that can be downloaded by premium users (every 6 hours)
 PREMIUM_DOWNLOADABLE_VIDEOS_LIMIT = 20
 
-# VPLink API Configuration
-VPLINK_API_TOKEN = "602a4c7facf8ec279b28f8763cd0f5e246252d59"
-VPLINK_API_URL = "https://vplink.in/api"
+# GPLinks API Configuration (replaced VPLink)
+GPLINK_API_TOKEN = "a1b06e56b6c9bf905ea9671e1e9ae508d5a302e5"
+GPLINK_API_URL = "https://api.gplinks.com/api"
 # Bot username for deep links (from .env)
 BOT_USERNAME = os.getenv('BOT_USERNAME', 'Test_videos69_bot')
 # Secret key for encrypting verification tokens
@@ -393,29 +393,38 @@ async def create_shortened_link(user_id):
     # Format: https://t.me/BotUsername?start=token
     bot_deep_link = f"https://t.me/{BOT_USERNAME}?start={full_token}"
     
-    # Generate unique alias for VPLink
+    # Generate unique alias for GPLinks
     alias = f"v_{user_id}_{timestamp}"
     
-    # Build VPLink API URL to shorten the bot deep link
-    api_url = f"{VPLINK_API_URL}?api={VPLINK_API_TOKEN}&url={bot_deep_link}&alias={alias}&format=text"
+    # Build GPLinks API URL to shorten the bot deep link
+    # Using JSON response format (default)
+    api_url = f"{GPLINK_API_URL}?api={GPLINK_API_TOKEN}&url={bot_deep_link}&alias={alias}"
     
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(api_url) as response:
                 if response.status == 200:
-                    shortened_url = await response.text()
-                    shortened_url = shortened_url.strip()
+                    # GPLinks returns JSON response
+                    result = await response.json()
                     
-                    # Store the shortened link in user state
-                    user_states[user_id]['ad_link'] = shortened_url
-                    # Save to persistent storage
-                    save_user_states(user_states)
-                    
-                    print(f"✅ Created shortened link for user {user_id}: {shortened_url}")
-                    print(f"   Token: {full_token}")
-                    return shortened_url
+                    # Check if the request was successful
+                    if result.get("status") == "success":
+                        shortened_url = result.get("shortenedUrl", "").strip()
+                        
+                        # Store the shortened link in user state
+                        user_states[user_id]['ad_link'] = shortened_url
+                        # Save to persistent storage
+                        save_user_states(user_states)
+                        
+                        print(f"✅ Created GPLinks shortened link for user {user_id}: {shortened_url}")
+                        print(f"   Token: {full_token}")
+                        return shortened_url
+                    else:
+                        error_msg = result.get("message", "Unknown error")
+                        print(f"❌ GPLinks API error: {error_msg}")
+                        return None
                 else:
-                    print(f"❌ Failed to create shortened link: {response.status}")
+                    print(f"❌ Failed to create shortened link: HTTP {response.status}")
                     return None
     except Exception as e:
         print(f"❌ Error creating shortened link: {e}")
@@ -699,7 +708,7 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 if not is_premium:
                     increment_video_count(user_id)
                 
-                # Create buttons based on download availability
+                # Create buttons based on download availability and premium status
                 keyboard = []
                 
                 # Add Download button if user has downloads remaining
@@ -715,6 +724,10 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 
                 # Always add Next button
                 keyboard.append([InlineKeyboardButton("▶️ Next", callback_data='next_video')])
+                
+                # Add "Unlock Premium" button for non-premium users (always shown)
+                if not is_premium:
+                    keyboard.append([InlineKeyboardButton("🔓 Unlock Premium", callback_data='unlock_premium')])
                 
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 
@@ -1153,6 +1166,38 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=query.message.chat_id,
             user_id=query.from_user.id
         )
+    
+    elif query.data == 'unlock_premium':
+        # User clicked "Unlock Premium" button - show Watch Ad option
+        user_id = query.from_user.id
+        
+        keyboard = [[InlineKeyboardButton("📺 Watch Ad to Get Premium", callback_data='watch_ad')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        try:
+            await query.message.edit_text(
+                "💎 **Unlock Premium Access!**\n\n"
+                "Get premium benefits:\n"
+                "✅ **Unlimited** video watching\n"
+                "✅ **20 downloads** every 6 hours (10x more!)\n"
+                "✅ **12 hours** of premium access\n\n"
+                "Click the button below to watch an ad and unlock premium! 🚀",
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            # If edit fails, send new message
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="💎 **Unlock Premium Access!**\n\n"
+                     "Get premium benefits:\n"
+                     "✅ **Unlimited** video watching\n"
+                     "✅ **20 downloads** every 6 hours (10x more!)\n"
+                     "✅ **12 hours** of premium access\n\n"
+                     "Click the button below to watch an ad and unlock premium! 🚀",
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
     
     elif query.data == 'watch_ad':
         # Create a unique shortened link for this user
