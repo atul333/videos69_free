@@ -57,7 +57,7 @@ used_tokens = set()
 all_users = set()
 
 # Video limit for free users (resets every 6 hours)
-HOURLY_VIDEO_LIMIT = 15
+HOURLY_VIDEO_LIMIT = 5  # Changed from 15 to 5
 # Premium access duration after watching ad (12 hours)
 PREMIUM_DURATION_HOURS = 12
 # Number of videos that can be downloaded/saved by normal users (every 6 hours)
@@ -65,9 +65,9 @@ DOWNLOADABLE_VIDEOS_LIMIT = 2
 # Number of videos that can be downloaded by premium users (every 6 hours)
 PREMIUM_DOWNLOADABLE_VIDEOS_LIMIT = 20
 
-# GPLinks API Configuration (replaced VPLink)
-GPLINK_API_TOKEN = "a1b06e56b6c9bf905ea9671e1e9ae508d5a302e5"
-GPLINK_API_URL = "https://api.gplinks.com/api"
+# VPLink API Configuration (switched back from GPLinks)
+VPLINK_API_TOKEN = "602a4c7facf8ec279b28f8763cd0f5e246252d59"
+VPLINK_API_URL = "https://vplink.in/api"
 # Bot username for deep links (from .env)
 BOT_USERNAME = os.getenv('BOT_USERNAME', 'Test_videos69_bot')
 # Secret key for encrypting verification tokens
@@ -393,18 +393,18 @@ async def create_shortened_link(user_id):
     # Format: https://t.me/BotUsername?start=token
     bot_deep_link = f"https://t.me/{BOT_USERNAME}?start={full_token}"
     
-    # Generate unique alias for GPLinks
+    # Generate unique alias for VPLink
     alias = f"v_{user_id}_{timestamp}"
     
-    # Build GPLinks API URL to shorten the bot deep link
+    # Build VPLink API URL to shorten the bot deep link
     # Using JSON response format (default)
-    api_url = f"{GPLINK_API_URL}?api={GPLINK_API_TOKEN}&url={bot_deep_link}&alias={alias}"
+    api_url = f"{VPLINK_API_URL}?api={VPLINK_API_TOKEN}&url={bot_deep_link}&alias={alias}"
     
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(api_url) as response:
                 if response.status == 200:
-                    # GPLinks returns JSON response
+                    # VPLink returns JSON response
                     result = await response.json()
                     
                     # Check if the request was successful
@@ -416,12 +416,12 @@ async def create_shortened_link(user_id):
                         # Save to persistent storage
                         save_user_states(user_states)
                         
-                        print(f"✅ Created GPLinks shortened link for user {user_id}: {shortened_url}")
+                        print(f"✅ Created VPLink shortened link for user {user_id}: {shortened_url}")
                         print(f"   Token: {full_token}")
                         return shortened_url
                     else:
                         error_msg = result.get("message", "Unknown error")
-                        print(f"❌ GPLinks API error: {error_msg}")
+                        print(f"❌ VPLink API error: {error_msg}")
                         return None
                 else:
                     print(f"❌ Failed to create shortened link: HTTP {response.status}")
@@ -486,7 +486,7 @@ async def broadcast_hourly_reset(context: ContextTypes.DEFAULT_TYPE):
         f"⏰ Time: **{time_str} IST**\n"
         f"📅 Date: **{date_str}**\n\n"
         f"✨ Your limits have been renewed!\n"
-        f"🎥 You can now watch **15 free videos**\n"
+        f"🎥 You can now watch **5 free videos**\n"
         f"📥 You can download **2 videos**\n"
         f"💎 Premium users get **20 downloads**!\n\n"
         f"⏱️ Limits reset every **6 hours**\n"
@@ -659,7 +659,7 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=f"❌ **Limit Reached!**\n\n"
-                     f"You've watched all **15 videos** for this 6-hour period.\n\n"
+                     f"You've watched all **5 videos** for this 6-hour period.\n\n"
                      f"**Options**:\n"
                      f"• 📺 Watch an ad to get **12 hours of unlimited access**\n"
                      f"• ⏰ Wait **{time_msg}** for your limit to reset at **{next_reset_ist.strftime('%I:%M %p')} IST**\n\n"
@@ -1122,7 +1122,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"✅ **Verified!**\n\n"
                     f"Welcome {first_name}! 👋\n\n"
                     f"You've successfully joined the channel!\n\n"
-                    f"🎥 You can watch **15 videos** every 6 hours for free!\n"
+                    f"🎥 You can watch **5 videos** every 6 hours for free!\n"
                     f"📥 You can download **2 videos** every 6 hours!\n"
                     f"⏰ Your limits reset every **6 hours** (12 AM, 6 AM, 12 PM, 6 PM)!\n\n"
                     f"💎 Want unlimited access? Watch an ad to get **12 hours of premium**!\n\n"
@@ -1365,31 +1365,43 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if "Message is not modified" not in str(e):
                         print(f"⚠️ Error updating message: {e}")
                 
-                # Send confirmation message
+                # Send confirmation message with deletion warning
                 if remaining > 0:
                     if is_premium:
-                        await context.bot.send_message(
+                        confirmation_msg = await context.bot.send_message(
                             chat_id=query.message.chat_id,
                             text=f"✅ **Download Successful!**\n\n"
                                  f"The video above can be saved/forwarded.\n"
-                                 f"💎 Premium: You have {remaining}/{download_limit} download(s) remaining."
+                                 f"💎 Premium: You have {remaining}/{download_limit} download(s) remaining.\n\n"
+                                 f"⚠️ This video will be deleted after 20 minutes."
                         )
                     else:
-                        await context.bot.send_message(
+                        confirmation_msg = await context.bot.send_message(
                             chat_id=query.message.chat_id,
                             text=f"✅ **Download Successful!**\n\n"
                                  f"The video above can be saved/forwarded.\n"
-                                 f"📥 You have {remaining} download(s) remaining."
+                                 f"📥 You have {remaining} download(s) remaining.\n\n"
+                                 f"⚠️ This video will be deleted after 20 minutes."
                         )
                 else:
-                    await context.bot.send_message(
+                    confirmation_msg = await context.bot.send_message(
                         chat_id=query.message.chat_id,
                         text=f"✅ **Download Successful!**\n\n"
                              f"The video above can be saved/forwarded.\n"
-                             f"🔒 This was your last download. Future videos will be protected."
+                             f"🔒 This was your last download. Future videos will be protected.\n\n"
+                             f"⚠️ This video will be deleted after 20 minutes."
                     )
                 
+                # Schedule deletion of downloaded video and confirmation message after 20 minutes (1200 seconds)
+                context.job_queue.run_once(
+                    delete_messages,
+                    when=1200,  # 20 minutes in seconds
+                    data={'chat_id': query.message.chat_id, 'message_ids': [download_msg.message_id, confirmation_msg.message_id]},
+                    name=f"delete_download_{query.message.chat_id}_{download_msg.message_id}"
+                )
+                
                 print(f"📥 User {user_id} downloaded video {message_id} ({remaining} downloads remaining)")
+                print(f"🗑️ Scheduled deletion of downloaded video {download_msg.message_id} in 20 minutes")
                 
             except Exception as e:
                 print(f"❌ Error sending downloadable video: {e}")
