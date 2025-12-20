@@ -305,27 +305,27 @@ def is_premium_user(user_id):
 
 
 def check_and_reset_hourly_limit(user_id):
-    """Check if limit needs to be reset (every 6 hours)"""
+    """Check if limit needs to be reset (every 12 hours)"""
     if user_id not in user_states:
         init_user_state(user_id)
     
     user_state = user_states[user_id]
     now = datetime.now(timezone.utc)
     
-    # Calculate the start of the current 6-hour period
-    # Periods: 00:00-06:00, 06:00-12:00, 12:00-18:00, 18:00-24:00
+    # Calculate the start of the current 12-hour period
+    # Periods: 00:00-12:00, 12:00-24:00
     current_hour = now.hour
-    period_start_hour = (current_hour // 6) * 6  # 0, 6, 12, or 18
+    period_start_hour = (current_hour // 12) * 12  # 0 or 12
     current_period_start = now.replace(hour=period_start_hour, minute=0, second=0, microsecond=0)
     
-    # Reset if we've moved to a new 6-hour period
+    # Reset if we've moved to a new 12-hour period
     if current_period_start > user_state['last_reset']:
         user_state['hourly_count'] = 0
-        user_state['downloaded_count'] = 0  # Reset download count every 6 hours
+        user_state['downloaded_count'] = 0  # Reset download count every 12 hours
         user_state['last_reset'] = current_period_start
         # Save to persistent storage
         save_user_states(user_states)
-        print(f"🔄 6-hour reset for user {user_id}: watch count and download count reset")
+        print(f"🔄 12-hour reset for user {user_id}: watch count and download count reset")
         return True  # Indicate that reset occurred
     return False  # No reset occurred
 
@@ -461,10 +461,10 @@ async def delete_messages(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def broadcast_hourly_reset(context: ContextTypes.DEFAULT_TYPE):
-    """Broadcast message to all users about limit reset - sent every 6 hours"""
+    """Broadcast message to all users about limit reset - sent every 12 hours"""
     
     print("\n" + "=" * 60)
-    print("🔔 6-HOUR RESET BROADCAST TRIGGERED!")
+    print("🔔 12-HOUR RESET BROADCAST TRIGGERED!")
     print("=" * 60)
     
     # Get current time in IST
@@ -489,7 +489,7 @@ async def broadcast_hourly_reset(context: ContextTypes.DEFAULT_TYPE):
         f"🎥 You can now watch **5 free videos**\n"
         f"📥 You can download **2 videos**\n"
         f"💎 Premium users get **20 downloads**!\n\n"
-        f"⏱️ Limits reset every **6 hours**\n"
+        f"⏱️ Limits reset every **12 hours**\n"
         f"💎 Want unlimited videos + 20 downloads? Watch an ad!\n\n"
         f"Click below to start watching!\n\n"
         f"Enjoy! 🍿"
@@ -532,7 +532,7 @@ async def broadcast_hourly_reset(context: ContextTypes.DEFAULT_TYPE):
     if blocked_users:
         batch_remove_users(blocked_users)
     
-    print(f"📢 6-hour reset broadcast complete! Sent to {successful} users, {failed} failed")
+    print(f"📢 12-hour reset broadcast complete! Sent to {successful} users, {failed} failed")
     print(f"⏰ Broadcast time: {time_str} IST")
     print(f"📅 Broadcast date: {date_str}")
     print(f"👥 Total users in database: {get_user_count()}")
@@ -583,9 +583,9 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                     now = datetime.now(timezone.utc)
                     now_ist = utc_to_ist(now)
                     
-                    # Calculate next 6-hour period (00:00, 06:00, 12:00, 18:00)
+                    # Calculate next 12-hour period (00:00, 12:00)
                     current_hour = now_ist.hour
-                    next_period_hour = ((current_hour // 6) + 1) * 6
+                    next_period_hour = ((current_hour // 12) + 1) * 12
                     
                     if next_period_hour >= 24:
                         # Next period is tomorrow at 00:00
@@ -617,7 +617,7 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                              f"**Options**:\n"
                              f"• 📺 Watch an ad to get **12 more hours of premium**\n"
                              f"• ⏰ Wait **{time_msg}** for your limit to reset at **{next_reset_ist.strftime('%I:%M %p')} IST**\n\n"
-                             f"⏱️ Limits reset every 6 hours at: 12 AM, 6 AM, 12 PM, 6 PM\n\n"
+                             f"⏱️ Limits reset every 12 hours at: 12 AM, 12 PM\n\n"
                              f"Choose an option below:",
                         parse_mode='Markdown',
                         reply_markup=reply_markup
@@ -625,13 +625,13 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                     return
             
             # Regular limit reached (no premium or never had premium)
-            # Calculate next 6-hour period reset time
+            # Calculate next 12-hour period reset time
             now = datetime.now(timezone.utc)
             now_ist = utc_to_ist(now)
             
-            # Calculate next 6-hour period (00:00, 06:00, 12:00, 18:00)
+            # Calculate next 12-hour period (00:00, 12:00)
             current_hour = now_ist.hour
-            next_period_hour = ((current_hour // 6) + 1) * 6
+            next_period_hour = ((current_hour // 12) + 1) * 12
             
             if next_period_hour >= 24:
                 # Next period is tomorrow at 00:00
@@ -659,11 +659,11 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=f"❌ **Limit Reached!**\n\n"
-                     f"You've watched all **5 videos** for this 6-hour period.\n\n"
+                     f"You've watched all **5 videos** for this 12-hour period.\n\n"
                      f"**Options**:\n"
                      f"• 📺 Watch an ad to get **12 hours of unlimited access**\n"
                      f"• ⏰ Wait **{time_msg}** for your limit to reset at **{next_reset_ist.strftime('%I:%M %p')} IST**\n\n"
-                     f"⏱️ Limits reset every 6 hours at: 12 AM, 6 AM, 12 PM, 6 PM\n\n"
+                     f"⏱️ Limits reset every 12 hours at: 12 AM, 12 PM\n\n"
                      f"Choose an option below:",
                 parse_mode='Markdown',
                 reply_markup=reply_markup
@@ -1503,13 +1503,13 @@ def main():
         # IST timezone
         ist_tz = pytz.timezone('Asia/Kolkata')
         
-        # Calculate when to run the first broadcast (at the next 6-hour period start)
+        # Calculate when to run the first broadcast (at the next 12-hour period start)
         now_utc = datetime.now(timezone.utc)
         now_ist = now_utc + timedelta(hours=5, minutes=30)
         
-        # Calculate next 6-hour period start (00:00, 06:00, 12:00, or 18:00)
+        # Calculate next 12-hour period start (00:00 or 12:00)
         current_hour = now_ist.hour
-        next_period_hour = ((current_hour // 6) + 1) * 6
+        next_period_hour = ((current_hour // 12) + 1) * 12
         
         if next_period_hour >= 24:
             # Next period is tomorrow at 00:00
@@ -1520,25 +1520,25 @@ def main():
         
         next_broadcast_utc = next_broadcast_ist - timedelta(hours=5, minutes=30)
         
-        # Calculate seconds until next 6-hour period
+        # Calculate seconds until next 12-hour period
         seconds_until_next_broadcast = (next_broadcast_utc - now_utc).total_seconds()
         
-        # Schedule for every 6 hours
+        # Schedule for every 12 hours
         job_queue = application.job_queue
         
-        # Run every 6 hours at 00:00, 06:00, 12:00, 18:00
+        # Run every 12 hours at 00:00, 12:00
         job_queue.run_repeating(
             broadcast_hourly_reset,
-            interval=21600,  # Every 6 hours in seconds (6 * 3600)
-            first=seconds_until_next_broadcast,  # Wait until next 6-hour period
-            name='6hour_broadcast'
+            interval=43200,  # Every 12 hours in seconds (12 * 3600)
+            first=seconds_until_next_broadcast,  # Wait until next 12-hour period
+            name='12hour_broadcast'
         )
         
-        print(f"📢 6-hour broadcast scheduler enabled!")
+        print(f"📢 12-hour broadcast scheduler enabled!")
         print(f"   Current time: {now_ist.strftime('%I:%M %p')} IST")
         print(f"   Next broadcast: {next_broadcast_ist.strftime('%I:%M %p')} IST")
         print(f"   Waiting: {int(seconds_until_next_broadcast / 60)} minutes {int(seconds_until_next_broadcast % 60)} seconds")
-        print(f"   Then every 6 hours at: 12:00 AM, 6:00 AM, 12:00 PM, 6:00 PM")
+        print(f"   Then every 12 hours at: 12:00 AM, 12:00 PM")
         print()
         
         # Start the bot
