@@ -305,18 +305,24 @@ def is_premium_user(user_id):
 
 
 def check_and_reset_hourly_limit(user_id):
-    """Check if limit needs to be reset (every 12 hours)"""
+    """Check if limit needs to be reset (every 12 hours in IST)"""
     if user_id not in user_states:
         init_user_state(user_id)
     
     user_state = user_states[user_id]
     now = datetime.now(timezone.utc)
     
-    # Calculate the start of the current 12-hour period
-    # Periods: 00:00-12:00, 12:00-24:00
-    current_hour = now.hour
-    period_start_hour = (current_hour // 12) * 12  # 0 or 12
-    current_period_start = now.replace(hour=period_start_hour, minute=0, second=0, microsecond=0)
+    # Convert to IST for period calculation
+    now_ist = utc_to_ist(now)
+    
+    # Calculate the start of the current 12-hour period in IST
+    # Periods: 00:00-12:00 IST, 12:00-24:00 IST
+    current_hour_ist = now_ist.hour
+    period_start_hour_ist = (current_hour_ist // 12) * 12  # 0 or 12
+    current_period_start_ist = now_ist.replace(hour=period_start_hour_ist, minute=0, second=0, microsecond=0)
+    
+    # Convert back to UTC for storage
+    current_period_start = current_period_start_ist - timedelta(hours=5, minutes=30)
     
     # Reset if we've moved to a new 12-hour period
     if current_period_start > user_state['last_reset']:

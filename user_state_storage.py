@@ -128,8 +128,20 @@ def init_user_state_data(user_id: int, states: Dict[int, Dict[str, Any]]) -> Dic
     """Initialize user state with default values if not exists"""
     if user_id not in states:
         now = datetime.now(timezone.utc)
-        # Set last_reset to the start of the current hour
-        last_reset = now.replace(minute=0, second=0, microsecond=0)
+        # Set last_reset to the start of the current 12-hour period in IST
+        # Periods: 00:00-12:00 IST, 12:00-24:00 IST
+        # Convert to IST
+        from datetime import timedelta
+        ist_offset = timedelta(hours=5, minutes=30)
+        now_ist = now + ist_offset
+        
+        # Calculate period start in IST
+        current_hour_ist = now_ist.hour
+        period_start_hour_ist = (current_hour_ist // 12) * 12  # 0 or 12
+        period_start_ist = now_ist.replace(hour=period_start_hour_ist, minute=0, second=0, microsecond=0)
+        
+        # Convert back to UTC for storage
+        last_reset = period_start_ist - ist_offset
         
         new_state = {
             'seen_videos': [],
