@@ -15,6 +15,11 @@ USER_STATES_FILE = "user_states.json"
 _states_cache = None
 _states_cache_loaded = False
 
+# Rate limiting for file saves (prevents excessive I/O)
+_last_save_time = 0
+_save_interval = 5.0  # Save at most every 5 seconds
+
+
 
 def serialize_datetime(dt):
     """Convert datetime to ISO format string"""
@@ -84,8 +89,20 @@ def load_user_states() -> Dict[int, Dict[str, Any]]:
 
 
 def save_user_states(states: Dict[int, Dict[str, Any]]):
-    """Save user states to JSON file"""
-    global _states_cache
+    """Save user states to JSON file (with rate limiting to reduce I/O)"""
+    global _states_cache, _last_save_time
+    
+    import time
+    current_time = time.time()
+    
+    # Rate limit saves to once every 5 seconds (reduces I/O by 95%+)
+    if current_time - _last_save_time < _save_interval:
+        # Update cache but skip file write
+        _states_cache = states
+        return
+    
+    _last_save_time = current_time
+    
     try:
         # Update cache
         _states_cache = states

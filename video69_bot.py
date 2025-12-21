@@ -35,16 +35,23 @@ CHANNEL_IDENTIFIER = CHANNEL_ID if CHANNEL_ID else f"@{CHANNEL_USERNAME}"
 ADMIN_USER_ID = 7708376300  # Admin's Telegram user ID (https://t.me/Deep12048)
 
 # Configure request with longer timeouts
+# Configure request with optimized settings for high load
 request = HTTPXRequest(
-    connection_pool_size=8,
-    connect_timeout=30.0,  # 30 seconds for connection
-    read_timeout=30.0,     # 30 seconds for reading
-    write_timeout=30.0,    # 30 seconds for writing
-    pool_timeout=30.0      # 30 seconds for pool
+    connection_pool_size=32,  # Increased from 8 to 32 for better concurrency
+    connect_timeout=20.0,     # Reduced from 30 to 20 (faster failure detection)
+    read_timeout=20.0,        # Reduced from 30 to 20
+    write_timeout=20.0,       # Reduced from 30 to 20
+    pool_timeout=10.0         # Reduced from 30 to 10 (less waiting)
 )
 
 # Store video message IDs
 video_messages = []
+
+# Rate limiting to prevent overwhelming the bot
+from asyncio import Semaphore
+MAX_CONCURRENT_REQUESTS = 25  # Process max 25 requests simultaneously
+request_semaphore = Semaphore(MAX_CONCURRENT_REQUESTS)
+
 
 # Load user states from persistent storage (replaces in-memory dictionary)
 # Structure: {user_id: {'seen_videos': [], 'hourly_count': 0, 'last_reset': datetime, 'premium_until': datetime}}
@@ -519,9 +526,10 @@ async def broadcast_hourly_reset(context: ContextTypes.DEFAULT_TYPE):
             )
             successful += 1
             
-            # Add small delay to avoid hitting rate limits
+            # Add delay to avoid hitting rate limits (increased for stability)
             import asyncio
-            await asyncio.sleep(0.05)  # 50ms delay between messages
+            await asyncio.sleep(0.2)  # 200ms delay between messages (safer under load)
+
             
         except Exception as e:
             failed += 1
@@ -544,6 +552,34 @@ async def broadcast_hourly_reset(context: ContextTypes.DEFAULT_TYPE):
     print(f"👥 Total users in database: {get_user_count()}")
 
 
+
+
+async def rate_limited_send_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
+                                   chat_id=None, user_id=None):
+    """Rate-limited wrapper for send_random_video to prevent overload"""
+    import time
+    
+    async with request_semaphore:
+        start_time = time.time()
+        try:
+            await send_random_video(update, context, chat_id, user_id)
+            duration = time.time() - start_time
+            
+            # Log slow requests for monitoring
+            if duration > 2.0:
+                print(f"⚠️ Slow request: {duration:.2f}s for user {user_id}")
+                
+        except Exception as e:
+            print(f"⚠️ Error in rate-limited send: {e}")
+            # Send user-friendly error message
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id or update.effective_chat.id,
+                    text="⚠️ **Server is busy**\n\n"
+                         "Please try again in a moment. We're experiencing high traffic."
+                )
+            except:
+                pass  # Silently fail if we can't even send error message
 
 
 async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id=None, user_id=None):
@@ -1166,7 +1202,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     print(f"⚠️ Error editing message: {e}")
     
     elif query.data == 'next_video':
-        await send_random_video(
+        # Use rate-limited version to prevent overload
+        await rate_limited_send_video(
             update,
             context,
             chat_id=query.message.chat_id,
