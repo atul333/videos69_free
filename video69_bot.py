@@ -267,16 +267,30 @@ def get_random_video(user_id):
     # Generate a list of all possible message IDs
     all_message_ids = list(range(MIN_MESSAGE_ID, MAX_MESSAGE_ID + 1))
     
-    # Filter out videos the user has already seen
-    unseen_ids = [mid for mid in all_message_ids if mid not in user_state['seen_videos']]
+    # Get failed message IDs (messages that aren't videos or don't exist)
+    failed_ids = user_state.get('failed_message_ids', [])
     
-    # If user has seen all videos, reset their history
+    # Filter out videos the user has already seen AND failed message IDs
+    unseen_ids = [mid for mid in all_message_ids 
+                  if mid not in user_state['seen_videos'] 
+                  and mid not in failed_ids]
+    
+    # If user has seen all valid videos, reset their history and start over
     if not unseen_ids:
+        print(f"🔄 User {user_id} has seen all videos! Resetting seen list for loop playback.")
         user_state['seen_videos'] = []
-        unseen_ids = all_message_ids
+        # Keep failed_ids so we don't retry non-video messages
+        unseen_ids = [mid for mid in all_message_ids if mid not in failed_ids]
+        
+        # If still no videos (all messages failed), reset failed_ids too
+        if not unseen_ids:
+            print(f"⚠️ All message IDs failed for user {user_id}. Resetting failed list.")
+            user_state['failed_message_ids'] = []
+            unseen_ids = all_message_ids
     
     # Return a random unseen message ID
     return random.choice(unseen_ids)
+
 
 
 
@@ -830,8 +844,13 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             except Exception as e:
                 # This message ID doesn't exist or isn't a video, try another
                 print(f"⚠️ Message ID {message_id} failed: {e}")
-                # Mark as seen so we don't try it again
-                mark_video_as_seen(user_id, message_id)
+                # DON'T mark as seen - only mark successful videos as seen
+                # Instead, add to a separate failed_ids list to avoid retrying
+                if 'failed_message_ids' not in user_states[user_id]:
+                    user_states[user_id]['failed_message_ids'] = []
+                if message_id not in user_states[user_id]['failed_message_ids']:
+                    user_states[user_id]['failed_message_ids'].append(message_id)
+                    save_user_states(user_states)
                 continue
         
         # If we couldn't find any valid video after all attempts

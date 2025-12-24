@@ -167,7 +167,8 @@ def init_user_state_data(user_id: int, states: Dict[int, Dict[str, Any]]) -> Dic
             'premium_until': None,
             'ad_link': None,
             'ad_token': None,
-            'downloaded_count': 0  # Track number of videos downloaded
+            'downloaded_count': 0,  # Track number of videos downloaded
+            'failed_message_ids': []  # Track message IDs that aren't videos
         }
         
         states[user_id] = new_state
