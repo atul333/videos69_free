@@ -1550,38 +1550,30 @@ def main():
         now_utc = datetime.now(timezone.utc)
         now_ist = now_utc + timedelta(hours=5, minutes=30)
         
-        # Calculate next 12-hour period start (00:00 or 12:00)
-        current_hour = now_ist.hour
-        next_period_hour = ((current_hour // 12) + 1) * 12
-        
-        if next_period_hour >= 24:
-            # Next period is tomorrow at 00:00
-            next_broadcast_ist = (now_ist + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        else:
-            # Next period is today
-            next_broadcast_ist = now_ist.replace(hour=next_period_hour, minute=0, second=0, microsecond=0)
+        # Calculate next midnight (00:00 IST)
+        next_broadcast_ist = (now_ist + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
         
         next_broadcast_utc = next_broadcast_ist - timedelta(hours=5, minutes=30)
         
-        # Calculate seconds until next 12-hour period
+        # Calculate seconds until next midnight
         seconds_until_next_broadcast = (next_broadcast_utc - now_utc).total_seconds()
         
-        # Schedule for every 12 hours
+        # Schedule for every 24 hours
         job_queue = application.job_queue
         
-        # Run every 12 hours at 00:00, 12:00
+        # Run every 24 hours at midnight (00:00 IST)
         job_queue.run_repeating(
-            broadcast_hourly_reset,
-            interval=43200,  # Every 12 hours in seconds (12 * 3600)
-            first=seconds_until_next_broadcast,  # Wait until next 12-hour period
-            name='12hour_broadcast'
+            broadcast_daily_reset,
+            interval=86400,  # Every 24 hours in seconds (24 * 3600)
+            first=seconds_until_next_broadcast,  # Wait until next midnight
+            name='daily_broadcast'
         )
         
-        print(f"📢 12-hour broadcast scheduler enabled!")
+        print(f"📢 Daily broadcast scheduler enabled!")
         print(f"   Current time: {now_ist.strftime('%I:%M %p')} IST")
         print(f"   Next broadcast: {next_broadcast_ist.strftime('%I:%M %p')} IST")
         print(f"   Waiting: {int(seconds_until_next_broadcast / 60)} minutes {int(seconds_until_next_broadcast % 60)} seconds")
-        print(f"   Then every 12 hours at: 12:00 AM, 12:00 PM")
+        print(f"   Then every 24 hours at midnight (12:00 AM)")
         print()
         
         # Start the bot
