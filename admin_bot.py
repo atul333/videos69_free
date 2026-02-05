@@ -150,26 +150,11 @@ async def handle_user_messages(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         # Regular user sending a message - Forward to admin
         try:
-            # Forward the message to admin
+            # Forward the message to admin (no additional user info message)
             await context.bot.forward_message(
                 chat_id=ADMIN_USER_ID,
                 from_chat_id=message.chat_id,
                 message_id=message.message_id
-            )
-            
-            # Send info about the user to admin
-            user_info = (
-                f"👤 **New Message from User**\n\n"
-                f"**Name:** {update.effective_user.first_name}\n"
-                f"**Username:** @{update.effective_user.username or 'None'}\n"
-                f"**User ID:** `{user_id}`\n\n"
-                f"💡 **To reply:** Reply to THIS message (not the forwarded one)."
-            )
-            
-            user_info_msg = await context.bot.send_message(
-                chat_id=ADMIN_USER_ID,
-                text=user_info,
-                parse_mode='Markdown'
             )
             
             # Send success message to user that will auto-delete after 2 seconds
