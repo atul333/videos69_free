@@ -36,7 +36,7 @@ The bot now has a fully automated premium access system with ad verification. Us
 
 ### For Users Watching Ad
 1. User clicks "Watch Ad" button
-2. Gets a unique shortened link (via VPLink)
+2. Gets a unique shortened link (via AroLinks)
 3. Clicks the link, completes ad verification
 4. Gets redirected back to bot with token in URL
 5. **Premium activates automatically!**
@@ -163,7 +163,7 @@ Please watch the ad yourself to get premium access.
 ```python
 DAILY_VIDEO_LIMIT = 2              # Free videos per day
 PREMIUM_DURATION_HOURS = 12        # Premium duration
-VPLINK_API_TOKEN = "..."           # VPLink API token
+AROLINKS_API_TOKEN = "..."           # AroLinks API token
 BOT_USERNAME = "Videos1_69_bot"    # Bot username for deep links
 SECRET_KEY = "..."                 # Secret for token encryption
 ```

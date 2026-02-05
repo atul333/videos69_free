@@ -72,9 +72,9 @@ DOWNLOADABLE_VIDEOS_LIMIT = 2
 # Number of videos that can be downloaded by premium users (every 6 hours)
 PREMIUM_DOWNLOADABLE_VIDEOS_LIMIT = 20
 
-# VPLink API Configuration (switched back from GPLinks)
-VPLINK_API_TOKEN = "602a4c7facf8ec279b28f8763cd0f5e246252d59"
-VPLINK_API_URL = "https://vplink.in/api"
+# AroLinks API Configuration
+AROLINKS_API_TOKEN = "cf0c76a4739d65e08d5990b0db1865b680f1de4a"
+AROLINKS_API_URL = "https://arolinks.com/api"
 # Bot username for deep links (from .env)
 BOT_USERNAME = os.getenv('BOT_USERNAME', 'Test_videos69_bot')
 # Secret key for encrypting verification tokens
@@ -88,7 +88,7 @@ MAX_MESSAGE_ID = int(os.getenv('MAX_MESSAGE_ID', '10'))  # Maximum message ID in
 # For private channels, you need to use the numeric chat ID (get it from @userinfobot)
 # For public channels, use @channelname
 MANDATORY_CHANNEL = -1003363678621  # Replace with your channel's numeric ID
-MANDATORY_CHANNEL_LINK = "https://t.me/+Pkij1IcrzhJjMDBl"
+MANDATORY_CHANNEL_LINK = "https://t.me/+A2FAI6TD5yZkN2Jl"
 
 # User data file path
 USERS_FILE = "users.json"
@@ -420,18 +420,18 @@ async def create_shortened_link(user_id):
     # Format: https://t.me/BotUsername?start=token
     bot_deep_link = f"https://t.me/{BOT_USERNAME}?start={full_token}"
     
-    # Generate unique alias for VPLink
+    # Generate unique alias for AroLinks
     alias = f"v_{user_id}_{timestamp}"
     
-    # Build VPLink API URL to shorten the bot deep link
+    # Build AroLinks API URL to shorten the bot deep link
     # Using JSON response format (default)
-    api_url = f"{VPLINK_API_URL}?api={VPLINK_API_TOKEN}&url={bot_deep_link}&alias={alias}"
+    api_url = f"{AROLINKS_API_URL}?api={AROLINKS_API_TOKEN}&url={bot_deep_link}&alias={alias}"
     
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(api_url) as response:
                 if response.status == 200:
-                    # VPLink returns JSON response
+                    # AroLinks returns JSON response
                     result = await response.json()
                     
                     # Check if the request was successful
@@ -443,12 +443,12 @@ async def create_shortened_link(user_id):
                         # Save to persistent storage
                         save_user_states(user_states)
                         
-                        print(f"✅ Created VPLink shortened link for user {user_id}: {shortened_url}")
+                        print(f"✅ Created AroLinks shortened link for user {user_id}: {shortened_url}")
                         print(f"   Token: {full_token}")
                         return shortened_url
                     else:
                         error_msg = result.get("message", "Unknown error")
-                        print(f"❌ VPLink API error: {error_msg}")
+                        print(f"❌ AroLinks API error: {error_msg}")
                         return None
                 else:
                     print(f"❌ Failed to create shortened link: HTTP {response.status}")

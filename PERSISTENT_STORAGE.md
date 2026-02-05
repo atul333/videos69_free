@@ -98,7 +98,7 @@ The `user_states.json` file stores data in this format:
     "hourly_count": 3,
     "last_reset": "2025-12-10T04:00:00+00:00",
     "premium_until": "2025-12-10T16:30:00+00:00",
-    "ad_link": "https://vplink.in/xyz",
+    "ad_link": "https://arolinks.com/xyz",
     "ad_token": "123456789_1733812345_abc123"
   }
 }

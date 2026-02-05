@@ -65,7 +65,7 @@ For each user, the following data is now persistent:
     "hourly_count": 3,                            // Videos this hour
     "last_reset": "2025-12-10T04:00:00+00:00",   // Last hourly reset
     "premium_until": "2025-12-10T16:30:00+00:00", // Premium expiry
-    "ad_link": "https://vplink.in/xyz",           // Ad link
+    "ad_link": "https://arolinks.com/xyz",           // Ad link
     "ad_token": "123456789_1733812345_abc123"    // Verification token
   }
 }

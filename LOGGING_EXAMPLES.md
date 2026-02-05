@@ -29,7 +29,7 @@
 
 🕐 Old button clicked by Mike (ID: 555555555) - Action: 'watch_ad'
    ✅ Processing anyway (callback query expired but action will execute)
-✅ Created shortened link for user 555555555: https://vplink.in/v_555555555_1234567890
+✅ Created shortened link for user 555555555: https://arolinks.com/v_555555555_1234567890
 
 🔘 Button clicked by Emma (ID: 111111111) - Action: 'next_video'
 ✅ Sent video message ID 3456 to user 111111111

@@ -7,8 +7,8 @@ Users MUST join the specified channel before they can use the bot. This is a for
 
 ```python
 # In bot.py
-MANDATORY_CHANNEL = "@+Pkij1IcrzhJjMDBl"
-MANDATORY_CHANNEL_LINK = "https://t.me/+Pkij1IcrzhJjMDBl"
+MANDATORY_CHANNEL = "@+A2FAI6TD5yZkN2Jl"
+MANDATORY_CHANNEL_LINK = "https://t.me/+A2FAI6TD5yZkN2Jl"
 ```
 
 ## How It Works
@@ -230,7 +230,7 @@ These statuses are NOT recognized:
 ⚠️ **Private Channels**
 - Works with private channels (invite links)
 - Works with public channels (@username)
-- Channel ID format: `@+Pkij1IcrzhJjMDBl` for private channels
+- Channel ID format: `@+A2FAI6TD5yZkN2Jl` for private channels
 
 ⚠️ **Error Handling**
 - If membership check fails, assumes user is not a member
