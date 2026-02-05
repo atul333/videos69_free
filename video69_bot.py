@@ -63,13 +63,13 @@ used_tokens = set()
 # Track all users who have started the bot (for broadcasting)
 all_users = set()
 
-# Video limit for free users (resets every 6 hours)
-HOURLY_VIDEO_LIMIT = 5  # Changed from 15 to 5
+# Video limit for free users (resets every 24 hours)
+DAILY_VIDEO_LIMIT = 3  # Free users can watch 3 videos per day
 # Premium access duration after watching ad (12 hours)
 PREMIUM_DURATION_HOURS = 12
-# Number of videos that can be downloaded/saved by normal users (every 6 hours)
+# Number of videos that can be downloaded/saved by normal users (every 24 hours)
 DOWNLOADABLE_VIDEOS_LIMIT = 2
-# Number of videos that can be downloaded by premium users (every 6 hours)
+# Number of videos that can be downloaded by premium users (every 24 hours)
 PREMIUM_DOWNLOADABLE_VIDEOS_LIMIT = 20
 
 # AroLinks API Configuration
@@ -325,8 +325,8 @@ def is_premium_user(user_id):
     return False
 
 
-def check_and_reset_hourly_limit(user_id):
-    """Check if limit needs to be reset (every 12 hours in IST)"""
+def check_and_reset_daily_limit(user_id):
+    """Check if limit needs to be reset (every 24 hours at midnight IST)"""
     if user_id not in user_states:
         init_user_state(user_id)
     
@@ -336,34 +336,31 @@ def check_and_reset_hourly_limit(user_id):
     # Convert to IST for period calculation
     now_ist = utc_to_ist(now)
     
-    # Calculate the start of the current 12-hour period in IST
-    # Periods: 00:00-12:00 IST, 12:00-24:00 IST
-    current_hour_ist = now_ist.hour
-    period_start_hour_ist = (current_hour_ist // 12) * 12  # 0 or 12
-    current_period_start_ist = now_ist.replace(hour=period_start_hour_ist, minute=0, second=0, microsecond=0)
+    # Calculate the start of the current day in IST (00:00 IST)
+    current_day_start_ist = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
     
     # Convert back to UTC for storage
-    current_period_start = current_period_start_ist - timedelta(hours=5, minutes=30)
+    current_day_start = current_day_start_ist - timedelta(hours=5, minutes=30)
     
-    # Reset if we've moved to a new 12-hour period
-    if current_period_start > user_state['last_reset']:
+    # Reset if we've moved to a new day
+    if current_day_start > user_state['last_reset']:
         user_state['hourly_count'] = 0
-        user_state['downloaded_count'] = 0  # Reset download count every 12 hours
-        user_state['last_reset'] = current_period_start
+        user_state['downloaded_count'] = 0  # Reset download count every 24 hours
+        user_state['last_reset'] = current_day_start
         # Save to persistent storage
         save_user_states(user_states)
-        print(f"🔄 12-hour reset for user {user_id}: watch count and download count reset")
+        print(f"🔄 Daily reset for user {user_id}: watch count and download count reset")
         return True  # Indicate that reset occurred
     return False  # No reset occurred
 
 
 def can_watch_video(user_id):
-    """Check if user can watch a video (premium or within hourly limit)"""
+    """Check if user can watch a video (premium or within daily limit)"""
     if is_premium_user(user_id):
         return True
     
-    check_and_reset_hourly_limit(user_id)
-    return user_states[user_id]['hourly_count'] < HOURLY_VIDEO_LIMIT
+    check_and_reset_daily_limit(user_id)
+    return user_states[user_id]['hourly_count'] < DAILY_VIDEO_LIMIT
 
 
 def increment_video_count(user_id):
@@ -487,19 +484,19 @@ async def delete_messages(context: ContextTypes.DEFAULT_TYPE):
     # No notification message - keep the chat clean!
 
 
-async def broadcast_hourly_reset(context: ContextTypes.DEFAULT_TYPE):
-    """Broadcast message to all users about limit reset - sent every 12 hours"""
+async def broadcast_daily_reset(context: ContextTypes.DEFAULT_TYPE):
+    """Broadcast message to all users about limit reset - sent every 24 hours at midnight"""
     
     print("\n" + "=" * 60)
-    print("🔔 12-HOUR RESET BROADCAST TRIGGERED!")
+    print("🔔 DAILY RESET BROADCAST TRIGGERED!")
     print("=" * 60)
     
     # Get current time in IST
     from datetime import datetime, timedelta, timezone
     ist_offset = timedelta(hours=5, minutes=30)
     current_time_ist = datetime.now(timezone.utc) + ist_offset
-    time_str = current_time_ist.strftime('%I:00 %p')  # e.g., "01:00 PM"
-    date_str = current_time_ist.strftime('%B %d, %Y')  # e.g., "November 30, 2025"
+    time_str = current_time_ist.strftime('%I:00 %p')  # e.g., "12:00 AM"
+    date_str = current_time_ist.strftime('%B %d, %Y')  # e.g., "February 6, 2026"
     
     print(f"⏰ Broadcasting at: {time_str} IST")
     print(f"📅 Date: {date_str}")
@@ -509,14 +506,14 @@ async def broadcast_hourly_reset(context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     message_text = (
-        f"🎬 **Limit Reset!** 🎬\n\n"
+        f"🎬 **Daily Limit Reset!** 🎬\n\n"
         f"⏰ Time: **{time_str} IST**\n"
         f"📅 Date: **{date_str}**\n\n"
         f"✨ Your limits have been renewed!\n"
-        f"🎥 You can now watch **5 free videos**\n"
+        f"🎥 You can now watch **3 free videos**\n"
         f"📥 You can download **2 videos**\n"
         f"💎 Premium users get **20 downloads**!\n\n"
-        f"⏱️ Limits reset every **12 hours**\n"
+        f"⏱️ Limits reset every **24 hours at midnight**\n"
         f"💎 Want unlimited videos + 20 downloads? Watch an ad!\n\n"
         f"Click below to start watching!\n\n"
         f"Enjoy! 🍿"
@@ -560,7 +557,7 @@ async def broadcast_hourly_reset(context: ContextTypes.DEFAULT_TYPE):
     if blocked_users:
         batch_remove_users(blocked_users)
     
-    print(f"📢 12-hour reset broadcast complete! Sent to {successful} users, {failed} failed")
+    print(f"📢 Daily reset broadcast complete! Sent to {successful} users, {failed} failed")
     print(f"⏰ Broadcast time: {time_str} IST")
     print(f"📅 Broadcast date: {date_str}")
     print(f"👥 Total users in database: {get_user_count()}")
@@ -635,20 +632,12 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             if user_id in user_states and user_states[user_id].get('premium_until'):
                 premium_until = user_states[user_id]['premium_until']
                 if datetime.now(timezone.utc) >= premium_until:
-                    # Premium has expired - calculate next hourly reset
+                    # Premium has expired - calculate next daily reset
                     now = datetime.now(timezone.utc)
                     now_ist = utc_to_ist(now)
                     
-                    # Calculate next 12-hour period (00:00, 12:00)
-                    current_hour = now_ist.hour
-                    next_period_hour = ((current_hour // 12) + 1) * 12
-                    
-                    if next_period_hour >= 24:
-                        # Next period is tomorrow at 00:00
-                        next_reset_ist = (now_ist + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-                    else:
-                        # Next period is today
-                        next_reset_ist = now_ist.replace(hour=next_period_hour, minute=0, second=0, microsecond=0)
+                    # Calculate next day at midnight (00:00 IST)
+                    next_reset_ist = (now_ist + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
                     
                     # Convert back to UTC for time calculation
                     next_reset = next_reset_ist - timedelta(hours=5, minutes=30)
@@ -672,8 +661,8 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                              f"Your premium access has ended.\n\n"
                              f"**Options**:\n"
                              f"• 📺 Watch an ad to get **12 more hours of premium**\n"
-                             f"• ⏰ Wait **{time_msg}** for your limit to reset at **{next_reset_ist.strftime('%I:%M %p')} IST**\n\n"
-                             f"⏱️ Limits reset every 12 hours at: 12 AM, 12 PM\n\n"
+                             f"• ⏰ Wait **{time_msg}** for your limit to reset at **midnight (12:00 AM) IST**\n\n"
+                             f"⏱️ Limits reset every **24 hours at midnight**\n\n"
                              f"Choose an option below:",
                         parse_mode='Markdown',
                         reply_markup=reply_markup
@@ -681,20 +670,12 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                     return
             
             # Regular limit reached (no premium or never had premium)
-            # Calculate next 12-hour period reset time
+            # Calculate next daily reset time (midnight)
             now = datetime.now(timezone.utc)
             now_ist = utc_to_ist(now)
             
-            # Calculate next 12-hour period (00:00, 12:00)
-            current_hour = now_ist.hour
-            next_period_hour = ((current_hour // 12) + 1) * 12
-            
-            if next_period_hour >= 24:
-                # Next period is tomorrow at 00:00
-                next_reset_ist = (now_ist + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-            else:
-                # Next period is today
-                next_reset_ist = now_ist.replace(hour=next_period_hour, minute=0, second=0, microsecond=0)
+            # Calculate next day at midnight (00:00 IST)
+            next_reset_ist = (now_ist + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
             
             # Convert back to UTC for time calculation
             next_reset = next_reset_ist - timedelta(hours=5, minutes=30)
@@ -714,12 +695,12 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"❌ **Limit Reached!**\n\n"
-                     f"You've watched all **5 videos** for this 12-hour period.\n\n"
+                text=f"❌ **Daily Limit Reached!**\n\n"
+                     f"You've watched all **3 free videos** for today.\n\n"
                      f"**Options**:\n"
                      f"• 📺 Watch an ad to get **12 hours of unlimited access**\n"
-                     f"• ⏰ Wait **{time_msg}** for your limit to reset at **{next_reset_ist.strftime('%I:%M %p')} IST**\n\n"
-                     f"⏱️ Limits reset every 12 hours at: 12 AM, 12 PM\n\n"
+                     f"• ⏰ Wait **{time_msg}** for your limit to reset at **midnight (12:00 AM) IST**\n\n"
+                     f"⏱️ Limits reset every **24 hours at midnight**\n\n"
                      f"Choose an option below:",
                 parse_mode='Markdown',
                 reply_markup=reply_markup
