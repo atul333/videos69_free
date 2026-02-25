@@ -10,6 +10,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from telegram.request import HTTPXRequest
 import aiohttp
 import hashlib
+import aiosqlite
 
 # Import persistent user state storage (SQLite-backed)
 from user_state_storage import (
@@ -99,117 +100,210 @@ MAX_MESSAGE_ID = int(os.getenv('MAX_MESSAGE_ID', '10'))  # Maximum message ID in
 MANDATORY_CHANNEL = -1003827947228  # Backup Videos69
 MANDATORY_CHANNEL_LINK = "https://t.me/+8MA7MsUSTD0zZDMx"
 
-# User data file path
-USERS_FILE = "users.json"
+# ── Bot users registry (persisted in user_states.db, 'bot_users' table) ──────
+# All reads come from _users_cache (instant, no I/O).
+# Writes mark the user dirty; the shared flush loop in user_state_storage.py
+# writes dirty users to SQLite every 10 seconds.
+OLD_USERS_JSON = "users.json"      # migrated automatically if still present
 
-# Cache for user data (loaded once, updated in memory)
-_users_cache = None
-_cache_loaded = False
+_users_cache: dict[int, dict] = {}  # {user_id: {first_name, username, ...}}
+_users_dirty: set[int] = set()      # user_ids needing a DB write
 
 
-# User file management functions (optimized for unlimited users)
-def load_users_from_file():
-    """Load users from JSON file (with caching)"""
-    global _users_cache, _cache_loaded
-    
-    # Return cached data if already loaded
-    if _cache_loaded and _users_cache is not None:
-        return _users_cache
-    
+# ── Called once from init_db() via post_init ────────────────────────
+async def _init_users_table(db):
+    """Create bot_users table and indexes (called inside init_db)."""
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS bot_users (
+            user_id     INTEGER PRIMARY KEY,
+            first_name  TEXT    NOT NULL DEFAULT '',
+            username    TEXT,
+            joined_date TEXT    NOT NULL DEFAULT (datetime('now')),
+            last_seen   TEXT    NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
+    # Index to speed up "get all user_ids" for broadcasts
+    await db.execute("""
+        CREATE INDEX IF NOT EXISTS idx_bot_users_joined
+            ON bot_users(joined_date)
+    """)
+    await db.commit()
+
+
+async def _load_users_from_db(db):
+    """Load all rows from bot_users into _users_cache."""
+    db.row_factory = aiosqlite.Row
+    async with db.execute("SELECT * FROM bot_users") as cur:
+        async for row in cur:
+            uid = row["user_id"]
+            _users_cache[uid] = {
+                "user_id":     uid,
+                "first_name":  row["first_name"],
+                "username":    row["username"],
+                "joined_date": row["joined_date"],
+                "last_seen":   row["last_seen"],
+            }
+
+
+async def _migrate_users_json(db):
+    """One-time migration from users.json → bot_users table."""
     try:
-        if os.path.exists(USERS_FILE):
-            with open(USERS_FILE, 'r', encoding='utf-8') as f:
-                _users_cache = json.load(f)
-                _cache_loaded = True
-                print(f"📂 Loaded {len(_users_cache)} users from file")
-                return _users_cache
-        else:
-            print("📂 No users file found, starting fresh")
-            _users_cache = []
-            _cache_loaded = True
-            return []
+        with open(OLD_USERS_JSON, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        for u in data:
+            uid = u.get("user_id")
+            if not uid:
+                continue
+            _users_cache[uid] = {
+                "user_id":     uid,
+                "first_name":  u.get("first_name", ""),
+                "username":    u.get("username"),
+                "joined_date": u.get("joined_date", datetime.now(timezone.utc).isoformat()),
+                "last_seen":   u.get("last_seen",   datetime.now(timezone.utc).isoformat()),
+            }
+            await db.execute("""
+                INSERT OR IGNORE INTO bot_users
+                    (user_id, first_name, username, joined_date, last_seen)
+                VALUES (?, ?, ?, ?, ?)
+            """, (uid,
+                  _users_cache[uid]["first_name"],
+                  _users_cache[uid]["username"],
+                  _users_cache[uid]["joined_date"],
+                  _users_cache[uid]["last_seen"]))
+        await db.commit()
+        os.rename(OLD_USERS_JSON, OLD_USERS_JSON + ".migrated")
+        print(f"✅ Migrated {len(data)} users from users.json → SQLite")
     except Exception as e:
-        print(f"⚠️ Error loading users file: {e}")
-        _users_cache = []
-        _cache_loaded = True
-        return []
+        print(f"⚠️ users.json migration error: {e}")
+
+
+async def _flush_users_to_db():
+    """Write dirty users to bot_users table (called by flush loop)."""
+    if not _users_dirty:
+        return
+    to_save = list(_users_dirty)
+    _users_dirty.clear()
+    try:
+        async with aiosqlite.connect("user_states.db") as db:
+            await db.execute("PRAGMA journal_mode=WAL")
+            for uid in to_save:
+                if uid not in _users_cache:
+                    continue
+                u = _users_cache[uid]
+                await db.execute("""
+                    INSERT INTO bot_users
+                        (user_id, first_name, username, joined_date, last_seen)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        first_name  = excluded.first_name,
+                        username    = excluded.username,
+                        last_seen   = excluded.last_seen
+                """, (uid, u["first_name"], u["username"],
+                      u["joined_date"], u["last_seen"]))
+            await db.commit()
+    except Exception as e:
+        _users_dirty.update(to_save)
+        print(f"⚠️ users DB flush error: {e}")
+
+
+# ── Public functions (same signatures as before) ─────────────────────────────
+def load_users_from_file():
+    """Return in-memory cache (populated at startup by init_db)."""
+    return list(_users_cache.values())
 
 
 def save_users_to_file(users_data):
-    """Save users to JSON file (optimized write)"""
-    global _users_cache
+    """
+    Legacy compatibility shim — marks all provided users dirty.
+    Prefer add_user_to_file() for single-user updates.
+    """
+    for u in users_data:
+        uid = u.get("user_id")
+        if uid:
+            _users_cache[uid] = u
+            _users_dirty.add(uid)
+    # Schedule async flush (non-blocking)
     try:
-        # Update cache
-        _users_cache = users_data
-        
-        # Write to file (async-safe)
-        with open(USERS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(users_data, f, indent=2, ensure_ascii=False)
-        
-        # Don't print on every save to reduce console spam
-        # print(f"💾 Saved {len(users_data)} users to file")
-    except Exception as e:
-        print(f"⚠️ Error saving users file: {e}")
+        loop = asyncio.get_running_loop()
+        loop.create_task(_flush_users_to_db())
+    except RuntimeError:
+        pass   # No running loop yet (startup) — init_db handles the flush
 
 
-def add_user_to_file(user_id, first_name, username=None):
-    """Add a new user to the file (checks for duplicates) - optimized"""
-    users_data = load_users_from_file()
-    
-    # Use dictionary for O(1) lookup instead of O(n) list iteration
-    user_dict = {user['user_id']: user for user in users_data}
-    
-    # Check if user already exists
-    if user_id in user_dict:
-        # User exists, update name if changed
-        user = user_dict[user_id]
-        if user['first_name'] != first_name or user.get('username') != username:
-            user['first_name'] = first_name
-            user['username'] = username
-            user['last_seen'] = datetime.now(timezone.utc).isoformat()
-            save_users_to_file(users_data)
-            # print(f"🔄 Updated user: {first_name} (ID: {user_id})")
-        return False  # User already existed
-    
-    # Add new user
-    new_user = {
-        'user_id': user_id,
-        'first_name': first_name,
-        'username': username,
-        'joined_date': datetime.now(timezone.utc).isoformat(),
-        'last_seen': datetime.now(timezone.utc).isoformat()
+def add_user_to_file(user_id: int, first_name: str, username=None) -> bool:
+    """Add or update a user in cache + mark dirty for DB write (instant return)."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    if user_id in _users_cache:
+        u = _users_cache[user_id]
+        # Only update (and mark dirty) if something actually changed
+        if u["first_name"] != first_name or u.get("username") != username:
+            u["first_name"] = first_name
+            u["username"]   = username
+            u["last_seen"]  = now_iso
+            _users_dirty.add(user_id)
+            # Schedule async flush
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(_flush_users_to_db())
+            except RuntimeError:
+                pass
+        return False  # Existing user
+
+    # New user
+    _users_cache[user_id] = {
+        "user_id":     user_id,
+        "first_name":  first_name,
+        "username":    username,
+        "joined_date": now_iso,
+        "last_seen":   now_iso,
     }
-    users_data.append(new_user)
-    save_users_to_file(users_data)
-    print(f"✅ Added new user: {first_name} (ID: {user_id})")
-    return True  # New user added
+    _users_dirty.add(user_id)
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_flush_users_to_db())
+    except RuntimeError:
+        pass
+    print(f"✅ New user: {first_name} (ID: {user_id})")
+    return True
 
 
-def get_all_user_ids():
-    """Get list of all user IDs from file (cached, very fast)"""
-    users_data = load_users_from_file()
-    return [user['user_id'] for user in users_data]
+def get_all_user_ids() -> list[int]:
+    """Return all user IDs instantly from cache (O(1))."""
+    return list(_users_cache.keys())
 
 
-def get_user_count():
-    """Get total number of users (O(1) operation)"""
-    users_data = load_users_from_file()
-    return len(users_data)
+def get_user_count() -> int:
+    """Return total user count instantly from cache."""
+    return len(_users_cache)
 
 
 def batch_remove_users(user_ids_to_remove):
-    """Remove multiple users at once (optimized for broadcast cleanup)"""
+    """Remove users from cache and schedule DB delete."""
     if not user_ids_to_remove:
         return
-    
-    users_data = load_users_from_file()
     remove_set = set(user_ids_to_remove)
-    
-    # Filter out users to remove (single pass)
-    users_data = [u for u in users_data if u['user_id'] not in remove_set]
-    
-    save_users_to_file(users_data)
-    print(f"🗑️ Removed {len(user_ids_to_remove)} users from file")
+    for uid in remove_set:
+        _users_cache.pop(uid, None)
+        _users_dirty.discard(uid)
+
+    async def _delete_from_db():
+        try:
+            async with aiosqlite.connect("user_states.db") as db:
+                await db.executemany(
+                    "DELETE FROM bot_users WHERE user_id = ?",
+                    [(uid,) for uid in remove_set]
+                )
+                await db.commit()
+            print(f"🗑️ Removed {len(remove_set)} users from DB")
+        except Exception as e:
+            print(f"⚠️ Error removing users from DB: {e}")
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_delete_from_db())
+    except RuntimeError:
+        pass
 
 
 async def check_channel_membership(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
@@ -1531,10 +1625,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(application: Application):
     """Initialize bot after startup"""
-    # 1. Init SQLite database and load all users into the in-memory cache
+    # 1. Init SQLite DB for user_states and start flush loop
     await init_db()
-    # 2. Start background task that flushes dirty users to DB every 10s
     start_flush_loop()
+
+    # 2. Init bot_users table in the same DB and load users into cache
+    async with aiosqlite.connect("user_states.db") as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await _init_users_table(db)
+        await _load_users_from_db(db)
+        # Migrate users.json if it exists and bot_users table is empty
+        if not _users_cache and os.path.exists(OLD_USERS_JSON):
+            await _migrate_users_json(db)
+
+    print(f"👥 {len(_users_cache)} registered users loaded from DB")
+
     # 3. Load available video IDs from the channel
     await load_videos_from_channel(application)
 
