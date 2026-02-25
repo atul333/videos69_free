@@ -87,8 +87,8 @@ MAX_MESSAGE_ID = int(os.getenv('MAX_MESSAGE_ID', '10'))  # Maximum message ID in
 # Mandatory channel to join (forced subscription)
 # For private channels, you need to use the numeric chat ID (get it from @userinfobot)
 # For public channels, use @channelname
-MANDATORY_CHANNEL = -1003363678621  # Replace with your channel's numeric ID
-MANDATORY_CHANNEL_LINK = "https://t.me/+A2FAI6TD5yZkN2Jl"
+MANDATORY_CHANNEL = -1003827947228  # Backup Videos69
+MANDATORY_CHANNEL_LINK = "https://t.me/+8MA7MsUSTD0zZDMx"
 
 # User data file path
 USERS_FILE = "users.json"
