@@ -306,36 +306,43 @@ def batch_remove_users(user_ids_to_remove):
         pass
 
 
+# ── Membership cache: avoids a Telegram API call on EVERY video request ──────
+# Format: {user_id: (is_member: bool, expires_at: float)}
+_membership_cache: dict[int, tuple[bool, float]] = {}
+MEMBERSHIP_CACHE_TTL = 300  # seconds (5 minutes)
+
 async def check_channel_membership(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
-    """Check if user is a member of the mandatory channel"""
+    """Check if user is a member of the mandatory channel.
+    Result is cached for 5 minutes to avoid expensive get_chat_member calls.
+    """
+    import time
+    now = time.monotonic()
+
+    # Return cached result if still fresh
+    cached = _membership_cache.get(user_id)
+    if cached is not None:
+        is_member, expires_at = cached
+        if now < expires_at:
+            return is_member
+
+    # Cache miss — call Telegram API
     try:
-        # Get user's status in the channel
-        member = await context.bot.get_chat_member(chat_id=MANDATORY_CHANNEL, user_id=user_id)
-        
-        # Check if user is a member (member, administrator, or creator)
+        member = await context.bot.get_chat_member(
+            chat_id=MANDATORY_CHANNEL, user_id=user_id
+        )
         status = member.status
-        print(f"📋 Membership check for user {user_id}: status = '{status}'")
-        
-        if status in ['member', 'administrator', 'creator']:
-            return True
-        elif status in ['left', 'kicked', 'banned']:
-            return False
-        else:
-            # Unknown status - treat as not member
-            print(f"⚠️ Unknown membership status '{status}' for user {user_id}")
-            return False
+        is_member = status in ('member', 'administrator', 'creator')
+        _membership_cache[user_id] = (is_member, now + MEMBERSHIP_CACHE_TTL)
+        return is_member
     except Exception as e:
-        error_msg = str(e)
-        print(f"❌ MEMBERSHIP CHECK ERROR for user {user_id}: {error_msg}")
-        # If the error is that the bot is not an admin / can't check,
-        # return True to avoid wrongly blocking users
-        if "bot is not a member" in error_msg.lower() or \
-           "chat not found" in error_msg.lower() or \
-           "bot was kicked" in error_msg.lower() or \
-           "forbidden" in error_msg.lower() or \
-           "have no rights" in error_msg.lower():
-            print(f"⚠️ Bot may not be admin in the mandatory channel! Add bot as admin in Backup Videos69.")
-            return True  # Don't block users if bot can't check
+        error_msg = str(e).lower()
+        if any(kw in error_msg for kw in
+               ('bot is not a member', 'chat not found', 'bot was kicked',
+                'forbidden', 'have no rights')):
+            print(f"⚠️ Bot may not be admin in mandatory channel! Add bot as admin.")
+            _membership_cache[user_id] = (True, now + MEMBERSHIP_CACHE_TTL)
+            return True
+        print(f"❌ MEMBERSHIP CHECK ERROR for user {user_id}: {e}")
         return False
 
 
@@ -373,56 +380,44 @@ async def load_videos_from_channel(application: Application):
 # Channel post handler removed - bot only uses predefined videos
 
 
-def get_random_video(user_id):
-    """Generate a random video message ID that the user hasn't seen yet"""
-    
+def get_random_video(user_id: int) -> int:
+    """Return a random unseen video message ID for the user.
+    Uses set operations (O(1) lookup) instead of list comprehensions.
+    """
     if user_id not in user_states:
         init_user_state(user_id)
-    
+
     user_state = user_states[user_id]
-    
-    # Use global configuration from .env file
-    # MIN_MESSAGE_ID and MAX_MESSAGE_ID are defined at the top of the file
-    
-    # Generate a list of all possible message IDs
-    all_message_ids = list(range(MIN_MESSAGE_ID, MAX_MESSAGE_ID + 1))
-    
-    # Get failed message IDs (messages that aren't videos or don't exist)
-    failed_ids = user_state.get('failed_message_ids', [])
-    
-    # Filter out videos the user has already seen AND failed message IDs
-    unseen_ids = [mid for mid in all_message_ids 
-                  if mid not in user_state['seen_videos'] 
-                  and mid not in failed_ids]
-    
-    # If user has seen all valid videos, reset their history and start over
-    if not unseen_ids:
-        print(f"🔄 User {user_id} has seen all videos! Resetting seen list for loop playback.")
+
+    # Compute candidate set once using set ops — O(1) membership tests
+    all_ids        = set(range(MIN_MESSAGE_ID, MAX_MESSAGE_ID + 1))
+    seen_set       = set(user_state.get('seen_videos', []))
+    failed_set     = set(user_state.get('failed_message_ids', []))
+    unseen         = all_ids - seen_set - failed_set
+
+    if not unseen:
+        # User has seen everything — reset and loop
+        print(f"🔄 User {user_id} has seen all videos! Resetting for loop playback.")
         user_state['seen_videos'] = []
-        # Keep failed_ids so we don't retry non-video messages
-        unseen_ids = [mid for mid in all_message_ids if mid not in failed_ids]
-        
-        # If still no videos (all messages failed), reset failed_ids too
-        if not unseen_ids:
+        unseen = all_ids - failed_set
+        if not unseen:
             print(f"⚠️ All message IDs failed for user {user_id}. Resetting failed list.")
             user_state['failed_message_ids'] = []
-            unseen_ids = all_message_ids
-    
-    # Return a random unseen message ID
-    return random.choice(unseen_ids)
+            unseen = all_ids
+
+    return random.choice(tuple(unseen))
 
 
 
 
-def mark_video_as_seen(user_id, video_id):
-    """Mark a video as seen by the user"""
+def mark_video_as_seen(user_id: int, video_id: int):
+    """Mark a video as seen by the user."""
     if user_id not in user_states:
         init_user_state(user_id)
-    
-    if video_id not in user_states[user_id]['seen_videos']:
-        user_states[user_id]['seen_videos'].append(video_id)
-        # Save to persistent storage
-        save_user_states(user_states)
+    seen = user_states[user_id]['seen_videos']
+    if video_id not in seen:
+        seen.append(video_id)
+        save_user_states(user_states, _hint_uid=user_id)  # only dirty this one user
 
 
 def init_user_state(user_id):
@@ -465,13 +460,12 @@ def check_and_reset_daily_limit(user_id):
     # Reset if we've moved to a new day
     if current_day_start > user_state['last_reset']:
         user_state['hourly_count'] = 0
-        user_state['downloaded_count'] = 0  # Reset download count every 24 hours
+        user_state['downloaded_count'] = 0
         user_state['last_reset'] = current_day_start
-        # Save to persistent storage
-        save_user_states(user_states)
-        print(f"🔄 Daily reset for user {user_id}: watch count and download count reset")
-        return True  # Indicate that reset occurred
-    return False  # No reset occurred
+        save_user_states(user_states, _hint_uid=user_id)
+        print(f"🔄 Daily reset for user {user_id}")
+        return True
+    return False
 
 
 def can_watch_video(user_id):
@@ -483,14 +477,12 @@ def can_watch_video(user_id):
     return user_states[user_id]['hourly_count'] < DAILY_VIDEO_LIMIT
 
 
-def increment_video_count(user_id):
-    """Increment user's hourly video count"""
+def increment_video_count(user_id: int):
+    """Increment user's daily video count."""
     if user_id not in user_states:
         init_user_state(user_id)
-    
     user_states[user_id]['hourly_count'] += 1
-    # Save to persistent storage
-    save_user_states(user_states)
+    save_user_states(user_states, _hint_uid=user_id)
 
 
 def utc_to_ist(utc_time):
@@ -499,33 +491,48 @@ def utc_to_ist(utc_time):
     return utc_time + ist_offset
 
 
-def grant_premium_access(user_id):
-    """Grant premium access for 12 hours after watching ad"""
+def grant_premium_access(user_id: int):
+    """Grant premium access for 12 hours after watching ad."""
     if user_id not in user_states:
         init_user_state(user_id)
-    
-    user_states[user_id]['premium_until'] = datetime.now(timezone.utc) + timedelta(hours=PREMIUM_DURATION_HOURS)
-    # Save to persistent storage
-    save_user_states(user_states)
-    print(f"💎 Premium access granted to user {user_id} until {user_states[user_id]['premium_until']}")
+    user_states[user_id]['premium_until'] = (
+        datetime.now(timezone.utc) + timedelta(hours=PREMIUM_DURATION_HOURS)
+    )
+    # Invalidate membership cache so next check re-evaluates premium state
+    _membership_cache.pop(user_id, None)
+    save_user_states(user_states, _hint_uid=user_id)
+    print(f"💎 Premium granted to user {user_id}")
+
+
+# ── Persistent aiohttp session (created once, reused for all HTTP requests) ──────
+# Creating a new ClientSession per-request is very expensive (TCP handshake each time)
+_http_session: aiohttp.ClientSession | None = None
+
+async def _get_http_session() -> aiohttp.ClientSession:
+    """Return the shared aiohttp session, creating it if needed."""
+    global _http_session
+    if _http_session is None or _http_session.closed:
+        connector = aiohttp.TCPConnector(limit=10, ttl_dns_cache=300)
+        _http_session = aiohttp.ClientSession(connector=connector)
+    return _http_session
 
 
 async def _shorten_via_vplinks(bot_deep_link: str, alias: str, user_id: int) -> str | None:
     """Try to shorten a link via VPLinks. Returns shortened URL or None."""
     api_url = f"{VPLINK_API_URL}?api={VPLINK_API_TOKEN}&url={bot_deep_link}&alias={alias}"
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=10)) as response:
-                if response.status == 200:
-                    result = await response.json(content_type=None)
-                    if result.get("status") == "success":
-                        shortened_url = result.get("shortenedUrl", "").strip()
-                        print(f"✅ [VPLinks] Shortened link for user {user_id}: {shortened_url}")
-                        return shortened_url
-                    else:
-                        print(f"❌ [VPLinks] API error: {result.get('message', 'Unknown error')}")
+        session = await _get_http_session()
+        async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+            if response.status == 200:
+                result = await response.json(content_type=None)
+                if result.get("status") == "success":
+                    shortened_url = result.get("shortenedUrl", "").strip()
+                    print(f"✅ [VPLinks] Shortened link for user {user_id}: {shortened_url}")
+                    return shortened_url
                 else:
-                    print(f"❌ [VPLinks] HTTP {response.status}")
+                    print(f"❌ [VPLinks] API error: {result.get('message', 'Unknown error')}")
+            else:
+                print(f"❌ [VPLinks] HTTP {response.status}")
     except Exception as e:
         print(f"❌ [VPLinks] Exception: {e}")
     return None
@@ -535,18 +542,18 @@ async def _shorten_via_arolinks(bot_deep_link: str, alias: str, user_id: int) ->
     """Try to shorten a link via AroLinks. Returns shortened URL or None."""
     api_url = f"{AROLINK_API_URL}?api={AROLINK_API_TOKEN}&url={bot_deep_link}&alias={alias}"
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=10)) as response:
-                if response.status == 200:
-                    result = await response.json(content_type=None)
-                    if result.get("status") == "success":
-                        shortened_url = result.get("shortenedUrl", "").strip()
-                        print(f"✅ [AroLinks] Shortened link for user {user_id}: {shortened_url}")
-                        return shortened_url
-                    else:
-                        print(f"❌ [AroLinks] API error: {result.get('message', 'Unknown error')}")
+        session = await _get_http_session()
+        async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+            if response.status == 200:
+                result = await response.json(content_type=None)
+                if result.get("status") == "success":
+                    shortened_url = result.get("shortenedUrl", "").strip()
+                    print(f"✅ [AroLinks] Shortened link for user {user_id}: {shortened_url}")
+                    return shortened_url
                 else:
-                    print(f"❌ [AroLinks] HTTP {response.status}")
+                    print(f"❌ [AroLinks] API error: {result.get('message', 'Unknown error')}")
+            else:
+                print(f"❌ [AroLinks] HTTP {response.status}")
     except Exception as e:
         print(f"❌ [AroLinks] Exception: {e}")
     return None
@@ -577,7 +584,7 @@ async def create_shortened_link(user_id):
     
     # Store the token in user state for verification
     user_states[user_id]['ad_token'] = full_token
-    save_user_states(user_states)
+    save_user_states(user_states, _hint_uid=user_id)
     
     # Create Telegram bot deep link
     bot_deep_link = f"https://t.me/{BOT_USERNAME}?start={full_token}"
@@ -606,7 +613,7 @@ async def create_shortened_link(user_id):
     if shortened_url:
         # Store the shortened link in user state
         user_states[user_id]['ad_link'] = shortened_url
-        save_user_states(user_states)
+        save_user_states(user_states, _hint_uid=user_id)
         print(f"   Token: {full_token}")
         return shortened_url
     
