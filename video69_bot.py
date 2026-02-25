@@ -11,10 +11,14 @@ from telegram.request import HTTPXRequest
 import aiohttp
 import hashlib
 
-# Import persistent user state storage
+# Import persistent user state storage (SQLite-backed)
 from user_state_storage import (
-    load_user_states, 
-    save_user_states, 
+    load_user_states,
+    save_user_states,
+    save_user_state,
+    init_db,
+    start_flush_loop,
+    stop_flush_loop,
     init_user_state_data,
     cleanup_expired_data,
     get_premium_users_count,
@@ -34,22 +38,22 @@ CHANNEL_IDENTIFIER = CHANNEL_ID if CHANNEL_ID else f"@{CHANNEL_USERNAME}"
 # Admin configuration for support system
 ADMIN_USER_ID = 7708376300  # Admin's Telegram user ID (https://t.me/Deep12048)
 
-# Configure request with longer timeouts
-# Configure request with optimized settings for high load
+# Configure request with optimized settings for a Telegram bot
+# Keep pool small — large pools consume OS resources and cause CPU overhead
 request = HTTPXRequest(
-    connection_pool_size=32,  # Increased from 8 to 32 for better concurrency
-    connect_timeout=20.0,     # Reduced from 30 to 20 (faster failure detection)
-    read_timeout=20.0,        # Reduced from 30 to 20
-    write_timeout=20.0,       # Reduced from 30 to 20
-    pool_timeout=10.0         # Reduced from 30 to 10 (less waiting)
+    connection_pool_size=8,   # 8 is plenty for a single-bot setup
+    connect_timeout=15.0,
+    read_timeout=15.0,
+    write_timeout=15.0,
+    pool_timeout=5.0
 )
 
 # Store video message IDs
 video_messages = []
 
-# Rate limiting to prevent overwhelming the bot
+# Rate limiting: keep low so the event loop stays responsive
 from asyncio import Semaphore
-MAX_CONCURRENT_REQUESTS = 25  # Process max 25 requests simultaneously
+MAX_CONCURRENT_REQUESTS = 8   # Only 8 handlers at once; more = CPU contention
 request_semaphore = Semaphore(MAX_CONCURRENT_REQUESTS)
 
 
@@ -1527,6 +1531,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(application: Application):
     """Initialize bot after startup"""
+    # 1. Init SQLite database and load all users into the in-memory cache
+    await init_db()
+    # 2. Start background task that flushes dirty users to DB every 10s
+    start_flush_loop()
+    # 3. Load available video IDs from the channel
     await load_videos_from_channel(application)
 
 
@@ -1656,15 +1665,11 @@ def main():
         print("📞 Users can contact admin via /help command")
         print()
         
-        # Run the bot with optimised async polling
-        # poll_interval: how often to ask Telegram for updates (0 = as fast as possible)
-        # timeout: long-poll timeout — keeps connection open, reduces API calls
-        # read_timeout / write_timeout: handled by HTTPXRequest above
         application.run_polling(
             allowed_updates=Update.ALL_TYPES,
-            poll_interval=0,      # No artificial delay between polls
-            timeout=30,           # Long-poll: waits up to 30s for new updates
-            drop_pending_updates=True,  # Ignore queued updates from when bot was offline
+            poll_interval=0.5,    # Poll every 0.5s — fast enough, avoids CPU burn from constant hammering
+            timeout=30,           # Long-poll: 30s open connection reduces API call count
+            drop_pending_updates=True,
         )
         
     except Exception as e:
