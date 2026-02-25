@@ -94,6 +94,10 @@ SECRET_KEY = "your_secret_key_here_change_this"  # Change this to a random secre
 MIN_MESSAGE_ID = 1
 MAX_MESSAGE_ID = int(os.getenv('MAX_MESSAGE_ID', '10'))  # Maximum message ID in your channel
 
+# Pre-built frozenset of all video IDs — computed ONCE at startup, reused forever.
+# This avoids rebuilding a 10k-element set on every single get_random_video() call.
+_ALL_VIDEO_IDS: frozenset = frozenset(range(MIN_MESSAGE_ID, MAX_MESSAGE_ID + 1))
+
 # Mandatory channel to join (forced subscription)
 # For private channels, you need to use the numeric chat ID (get it from @userinfobot)
 # For public channels, use @channelname
@@ -215,42 +219,32 @@ def load_users_from_file():
 def save_users_to_file(users_data):
     """
     Legacy compatibility shim — marks all provided users dirty.
-    Prefer add_user_to_file() for single-user updates.
+    The background flush loop handles the actual DB write every 10 seconds.
     """
     for u in users_data:
         uid = u.get("user_id")
         if uid:
             _users_cache[uid] = u
             _users_dirty.add(uid)
-    # Schedule async flush (non-blocking)
-    try:
-        loop = asyncio.get_running_loop()
-        loop.create_task(_flush_users_to_db())
-    except RuntimeError:
-        pass   # No running loop yet (startup) — init_db handles the flush
+    # Do NOT create_task here — the flush loop handles it every 10s
 
 
 def add_user_to_file(user_id: int, first_name: str, username=None) -> bool:
-    """Add or update a user in cache + mark dirty for DB write (instant return)."""
-    now_iso = datetime.now(timezone.utc).isoformat()
-
+    """Add or update a user in cache + mark dirty for the flush loop.
+    Returns instantly — no I/O, no task creation.
+    """
     if user_id in _users_cache:
         u = _users_cache[user_id]
-        # Only update (and mark dirty) if something actually changed
+        # Only dirty-mark when something actually changed (avoids pointless writes)
         if u["first_name"] != first_name or u.get("username") != username:
             u["first_name"] = first_name
             u["username"]   = username
-            u["last_seen"]  = now_iso
+            u["last_seen"]  = datetime.now(timezone.utc).isoformat()
             _users_dirty.add(user_id)
-            # Schedule async flush
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(_flush_users_to_db())
-            except RuntimeError:
-                pass
-        return False  # Existing user
+        return False  # Existing user — no task needed
 
     # New user
+    now_iso = datetime.now(timezone.utc).isoformat()
     _users_cache[user_id] = {
         "user_id":     user_id,
         "first_name":  first_name,
@@ -259,12 +253,8 @@ def add_user_to_file(user_id: int, first_name: str, username=None) -> bool:
         "last_seen":   now_iso,
     }
     _users_dirty.add(user_id)
-    try:
-        loop = asyncio.get_running_loop()
-        loop.create_task(_flush_users_to_db())
-    except RuntimeError:
-        pass
-    print(f"✅ New user: {first_name} (ID: {user_id})")
+    # Only print for genuinely new users (not on every returning user)
+    print(f"✅ New user registered: {first_name} (ID: {user_id})")
     return True
 
 
@@ -382,28 +372,23 @@ async def load_videos_from_channel(application: Application):
 
 def get_random_video(user_id: int) -> int:
     """Return a random unseen video message ID for the user.
-    Uses set operations (O(1) lookup) instead of list comprehensions.
+    Uses the pre-built _ALL_VIDEO_IDS frozenset (built once at startup)
+    and set difference operations — O(n) but with zero allocation for all_ids.
     """
     if user_id not in user_states:
         init_user_state(user_id)
 
     user_state = user_states[user_id]
-
-    # Compute candidate set once using set ops — O(1) membership tests
-    all_ids        = set(range(MIN_MESSAGE_ID, MAX_MESSAGE_ID + 1))
-    seen_set       = set(user_state.get('seen_videos', []))
-    failed_set     = set(user_state.get('failed_message_ids', []))
-    unseen         = all_ids - seen_set - failed_set
+    seen_set   = set(user_state.get('seen_videos', []))
+    failed_set = set(user_state.get('failed_message_ids', []))
+    unseen     = _ALL_VIDEO_IDS - seen_set - failed_set
 
     if not unseen:
-        # User has seen everything — reset and loop
-        print(f"🔄 User {user_id} has seen all videos! Resetting for loop playback.")
         user_state['seen_videos'] = []
-        unseen = all_ids - failed_set
+        unseen = _ALL_VIDEO_IDS - failed_set
         if not unseen:
-            print(f"⚠️ All message IDs failed for user {user_id}. Resetting failed list.")
             user_state['failed_message_ids'] = []
-            unseen = all_ids
+            unseen = _ALL_VIDEO_IDS
 
     return random.choice(tuple(unseen))
 
@@ -985,19 +970,15 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 )
                 
                 video_sent = True
-                print(f"✅ Sent video message ID {message_id} to user {user_id} (protected, downloads remaining: {DOWNLOADABLE_VIDEOS_LIMIT - downloaded_count})")
-                break  # Success! Exit the loop
+                break  # Success
                 
-            except Exception as e:
-                # This message ID doesn't exist or isn't a video, try another
-                print(f"⚠️ Message ID {message_id} failed: {e}")
-                # DON'T mark as seen - only mark successful videos as seen
-                # Instead, add to a separate failed_ids list to avoid retrying
+            except Exception:
+                # Message ID doesn't exist or isn't a video — mark failed and retry
                 if 'failed_message_ids' not in user_states[user_id]:
                     user_states[user_id]['failed_message_ids'] = []
                 if message_id not in user_states[user_id]['failed_message_ids']:
                     user_states[user_id]['failed_message_ids'].append(message_id)
-                    save_user_states(user_states)
+                    save_user_states(user_states, _hint_uid=user_id)
                 continue
         
         # If we couldn't find any valid video after all attempts
