@@ -75,6 +75,11 @@ PREMIUM_DOWNLOADABLE_VIDEOS_LIMIT = 20
 # VPLinks API Configuration
 VPLINK_API_TOKEN = "686ddc23e543449e56029d3de0a59e19677617de"
 VPLINK_API_URL = "https://vplink.in/api"
+# AroLinks API Configuration
+AROLINK_API_TOKEN = "cf0c76a4739d65e08d5990b0db1865b680f1de4a"
+AROLINK_API_URL = "https://arolinks.com/api"
+# Round-robin counter: 0 = VPLinks next, 1 = AroLinks next
+_link_service_counter = 0
 # Bot username for deep links (from .env)
 BOT_USERNAME = os.getenv('BOT_USERNAME', 'Test_videos69_bot')
 # Secret key for encrypting verification tokens
@@ -407,8 +412,55 @@ def grant_premium_access(user_id):
     print(f"💎 Premium access granted to user {user_id} until {user_states[user_id]['premium_until']}")
 
 
+async def _shorten_via_vplinks(bot_deep_link: str, alias: str, user_id: int) -> str | None:
+    """Try to shorten a link via VPLinks. Returns shortened URL or None."""
+    api_url = f"{VPLINK_API_URL}?api={VPLINK_API_TOKEN}&url={bot_deep_link}&alias={alias}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status == 200:
+                    result = await response.json(content_type=None)
+                    if result.get("status") == "success":
+                        shortened_url = result.get("shortenedUrl", "").strip()
+                        print(f"✅ [VPLinks] Shortened link for user {user_id}: {shortened_url}")
+                        return shortened_url
+                    else:
+                        print(f"❌ [VPLinks] API error: {result.get('message', 'Unknown error')}")
+                else:
+                    print(f"❌ [VPLinks] HTTP {response.status}")
+    except Exception as e:
+        print(f"❌ [VPLinks] Exception: {e}")
+    return None
+
+
+async def _shorten_via_arolinks(bot_deep_link: str, alias: str, user_id: int) -> str | None:
+    """Try to shorten a link via AroLinks. Returns shortened URL or None."""
+    api_url = f"{AROLINK_API_URL}?api={AROLINK_API_TOKEN}&url={bot_deep_link}&alias={alias}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status == 200:
+                    result = await response.json(content_type=None)
+                    if result.get("status") == "success":
+                        shortened_url = result.get("shortenedUrl", "").strip()
+                        print(f"✅ [AroLinks] Shortened link for user {user_id}: {shortened_url}")
+                        return shortened_url
+                    else:
+                        print(f"❌ [AroLinks] API error: {result.get('message', 'Unknown error')}")
+                else:
+                    print(f"❌ [AroLinks] HTTP {response.status}")
+    except Exception as e:
+        print(f"❌ [AroLinks] Exception: {e}")
+    return None
+
+
 async def create_shortened_link(user_id):
-    """Create a unique shortened link that opens the bot with encrypted token"""
+    """Create a unique shortened link that opens the bot with encrypted token.
+    Alternates between VPLinks and AroLinks on each call (round-robin).
+    Falls back to the other service if the selected one fails.
+    """
+    global _link_service_counter
+
     if user_id not in user_states:
         init_user_state(user_id)
     
@@ -427,49 +479,41 @@ async def create_shortened_link(user_id):
     
     # Store the token in user state for verification
     user_states[user_id]['ad_token'] = full_token
-    # Save to persistent storage
     save_user_states(user_states)
     
     # Create Telegram bot deep link
-    # Format: https://t.me/BotUsername?start=token
     bot_deep_link = f"https://t.me/{BOT_USERNAME}?start={full_token}"
     
-    # Generate unique alias for VPLinks
+    # Unique alias for the short link
     alias = f"v_{user_id}_{timestamp}"
     
-    # Build VPLinks API URL to shorten the bot deep link
-    # Using JSON response format (default)
-    api_url = f"{VPLINK_API_URL}?api={VPLINK_API_TOKEN}&url={bot_deep_link}&alias={alias}"
+    # --- Round-robin: pick which service goes first this request ---
+    use_vplinks_first = (_link_service_counter % 2 == 0)
+    _link_service_counter += 1
+    service_order = ("VPLinks", "AroLinks") if use_vplinks_first else ("AroLinks", "VPLinks")
+    print(f"🔗 Link service this request: {service_order[0]} (fallback: {service_order[1]}) | counter={_link_service_counter}")
     
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(api_url) as response:
-                if response.status == 200:
-                    # VPLinks returns JSON response
-                    result = await response.json()
-                    
-                    # Check if the request was successful
-                    if result.get("status") == "success":
-                        shortened_url = result.get("shortenedUrl", "").strip()
-                        
-                        # Store the shortened link in user state
-                        user_states[user_id]['ad_link'] = shortened_url
-                        # Save to persistent storage
-                        save_user_states(user_states)
-                        
-                        print(f"✅ Created VPLinks shortened link for user {user_id}: {shortened_url}")
-                        print(f"   Token: {full_token}")
-                        return shortened_url
-                    else:
-                        error_msg = result.get("message", "Unknown error")
-                        print(f"❌ VPLinks API error: {error_msg}")
-                        return None
-                else:
-                    print(f"❌ Failed to create shortened link: HTTP {response.status}")
-                    return None
-    except Exception as e:
-        print(f"❌ Error creating shortened link: {e}")
-        return None
+    # Try primary service
+    if use_vplinks_first:
+        shortened_url = await _shorten_via_vplinks(bot_deep_link, alias, user_id)
+        if not shortened_url:
+            print(f"⚠️ VPLinks failed, trying AroLinks as fallback...")
+            shortened_url = await _shorten_via_arolinks(bot_deep_link, alias + "a", user_id)
+    else:
+        shortened_url = await _shorten_via_arolinks(bot_deep_link, alias, user_id)
+        if not shortened_url:
+            print(f"⚠️ AroLinks failed, trying VPLinks as fallback...")
+            shortened_url = await _shorten_via_vplinks(bot_deep_link, alias + "v", user_id)
+    
+    if shortened_url:
+        # Store the shortened link in user state
+        user_states[user_id]['ad_link'] = shortened_url
+        save_user_states(user_states)
+        print(f"   Token: {full_token}")
+        return shortened_url
+    
+    print(f"❌ Both link services failed for user {user_id}")
+    return None
 
 
 
