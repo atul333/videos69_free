@@ -210,12 +210,29 @@ async def check_channel_membership(context: ContextTypes.DEFAULT_TYPE, user_id: 
         member = await context.bot.get_chat_member(chat_id=MANDATORY_CHANNEL, user_id=user_id)
         
         # Check if user is a member (member, administrator, or creator)
-        if member.status in ['member', 'administrator', 'creator']:
+        status = member.status
+        print(f"📋 Membership check for user {user_id}: status = '{status}'")
+        
+        if status in ['member', 'administrator', 'creator']:
             return True
+        elif status in ['left', 'kicked', 'banned']:
+            return False
         else:
+            # Unknown status - treat as not member
+            print(f"⚠️ Unknown membership status '{status}' for user {user_id}")
             return False
     except Exception as e:
-        print(f"⚠️ Error checking channel membership for user {user_id}: {e}")
+        error_msg = str(e)
+        print(f"❌ MEMBERSHIP CHECK ERROR for user {user_id}: {error_msg}")
+        # If the error is that the bot is not an admin / can't check,
+        # return True to avoid wrongly blocking users
+        if "bot is not a member" in error_msg.lower() or \
+           "chat not found" in error_msg.lower() or \
+           "bot was kicked" in error_msg.lower() or \
+           "forbidden" in error_msg.lower() or \
+           "have no rights" in error_msg.lower():
+            print(f"⚠️ Bot may not be admin in the mandatory channel! Add bot as admin in Backup Videos69.")
+            return True  # Don't block users if bot can't check
         return False
 
 
@@ -1164,9 +1181,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"✅ **Verified!**\n\n"
                     f"Welcome {first_name}! 👋\n\n"
                     f"You've successfully joined the channel!\n\n"
-                    f"🎥 You can watch **5 videos** every 6 hours for free!\n"
-                    f"📥 You can download **2 videos** every 6 hours!\n"
-                    f"⏰ Your limits reset every **6 hours** (12 AM, 6 AM, 12 PM, 6 PM)!\n\n"
+                    f"🎥 You can watch **3 free videos** per day!\n"
+                    f"📥 You can download **2 videos** per day!\n"
+                    f"⏰ Your limits reset every **24 hours at midnight (12:00 AM IST)**!\n\n"
                     f"💎 Want unlimited access? Watch an ad to get **12 hours of premium**!\n\n"
                     f"Click below to start watching! 🍿",
                     parse_mode='Markdown',
@@ -1321,9 +1338,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.send_message(
                         chat_id=query.message.chat_id,
                         text="❌ **Download Limit Reached!**\n\n"
-                             f"You've already downloaded {download_limit} videos this 6-hour period.\n"
-                             "Your download limit will reset at the next 6-hour period.\n\n"
-                             "⏱️ Resets at: 12 AM, 6 AM, 12 PM, 6 PM"
+                             f"You've already downloaded {download_limit} videos today.\n"
+                             "Your download limit will reset at midnight (12:00 AM IST).\n\n"
+                             "⏱️ Resets every **24 hours at midnight IST**"
                     )
                 else:
                     # Free user reached their 2 download limit - show premium promotion
@@ -1333,13 +1350,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.send_message(
                         chat_id=query.message.chat_id,
                         text="❌ **Download Limit Reached!**\n\n"
-                             f"You've already downloaded {download_limit} videos this 6-hour period.\n\n"
+                             f"You've already downloaded {download_limit} videos today.\n\n"
                              "💎 **Want More Downloads?**\n"
                              "Watch an ad to get Premium Access:\n\n"
                              "✅ **Unlimited** video watching\n"
-                             "✅ **20 downloads** every 6 hours (10x more!)\n"
+                             "✅ **20 downloads** per day (10x more!)\n"
                              "✅ **12 hours** of premium access\n\n"
-                             "⏱️ Limits reset every 6 hours at: 12 AM, 6 AM, 12 PM, 6 PM\n\n"
+                             "⏱️ Limits reset every **24 hours at midnight (12:00 AM IST)**\n\n"
                              "Click below to watch an ad and unlock premium! 🚀",
                         parse_mode='Markdown',
                         reply_markup=reply_markup
