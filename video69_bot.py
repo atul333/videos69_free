@@ -1656,8 +1656,16 @@ def main():
         print("📞 Users can contact admin via /help command")
         print()
         
-        # Run the bot
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        # Run the bot with optimised async polling
+        # poll_interval: how often to ask Telegram for updates (0 = as fast as possible)
+        # timeout: long-poll timeout — keeps connection open, reduces API calls
+        # read_timeout / write_timeout: handled by HTTPXRequest above
+        application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            poll_interval=0,      # No artificial delay between polls
+            timeout=30,           # Long-poll: waits up to 30s for new updates
+            drop_pending_updates=True,  # Ignore queued updates from when bot was offline
+        )
         
     except Exception as e:
         print(f"\n❌ Error starting bot: {e}")
