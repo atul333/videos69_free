@@ -7,7 +7,10 @@ import time as _time
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler,
+    ContextTypes, MessageHandler, ChatMemberHandler, filters
+)
 from telegram.request import HTTPXRequest
 import aiohttp
 import hashlib
@@ -323,7 +326,7 @@ def batch_remove_users(user_ids_to_remove):
 # ── Membership cache: stores per-channel status ───────────────────────────────
 # Format: {user_id: (r1: bool, r2: bool, expires_at: float)}
 _membership_cache: dict[int, tuple[bool, bool, float]] = {}
-MEMBERSHIP_CACHE_TTL = 60   # seconds — short so 'Verify' works within 60s of joining
+MEMBERSHIP_CACHE_TTL = 300  # 5 minutes — proactively invalidated by ChatMemberHandler on leave
 
 
 def _build_join_keyboard(r1: bool, r2: bool) -> InlineKeyboardMarkup:
@@ -340,7 +343,10 @@ def _build_join_keyboard(r1: bool, r2: bool) -> InlineKeyboardMarkup:
 async def check_channel_membership(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> tuple[bool, bool, bool]:
     """Check if user is a member of BOTH mandatory channels.
     Returns (all_joined, joined_ch1, joined_ch2).
-    Both checks run in parallel. Result cached for 60 seconds.
+    Both checks run in parallel. Result cached for 30 seconds.
+
+    IMPORTANT: The bot MUST be an admin in both mandatory channels.
+    Without admin rights, get_chat_member will fail and return False (fail-closed).
     """
     now = _time.monotonic()
 
@@ -359,17 +365,22 @@ async def check_channel_membership(context: ContextTypes.DEFAULT_TYPE, user_id: 
             del _membership_cache[k]
 
     async def _check_one(channel_id: int) -> bool:
-        """Returns False ONLY when Telegram explicitly confirms user is not a member.
-        All ambiguous errors (bot not admin, network, etc.) fail open → True.
+        """Fail-CLOSED: returns False on any error.
+        Bot MUST be admin in the channel for this to work.
         """
         try:
             member = await context.bot.get_chat_member(chat_id=channel_id, user_id=user_id)
-            return member.status not in ('left', 'kicked', 'banned')
+            return member.status not in ('left', 'kicked', 'banned', 'restricted')
         except Exception as e:
             err = str(e).lower()
-            if 'kicked' in err or 'banned' in err:
-                return False
-            return True   # fail open for all other errors
+            # Log a clear warning if the bot is not admin (most common misconfiguration)
+            if any(kw in err for kw in ('forbidden', 'not enough rights', 'not a member',
+                                        'have no rights', 'bot was kicked', 'chat not found')):
+                print(f"⚠️  ADMIN REQUIRED: Bot is not admin in channel {channel_id}. "
+                      f"Add the bot as admin to enforce membership! Error: {e}")
+            else:
+                print(f"⚠️  Membership check error for channel {channel_id}: {e}")
+            return False   # FAIL CLOSED — block user when check fails
 
     r1, r2 = await asyncio.gather(
         _check_one(MANDATORY_CHANNEL),
@@ -380,9 +391,9 @@ async def check_channel_membership(context: ContextTypes.DEFAULT_TYPE, user_id: 
 
 
 def get_main_menu_keyboard():
-    """Create the persistent menu keyboard with main buttons"""
+    """Create the persistent menu keyboard."""
     keyboard = [
-        [KeyboardButton("🎬 Get New Video"), KeyboardButton("💬 Contact Us")]
+        [KeyboardButton("💬 Contact Us")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -1123,51 +1134,33 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id = update.effective_user.id
     message = update.message
-    
-    # Check if it's a menu button press
-    if message.text:
-        if message.text == "🎬 Get New Video":
-            await rate_limited_send_video(
-                update,
-                context,
-                chat_id=message.chat_id,
-                user_id=user_id
-            )
-            return
-        
-        elif message.text == "💬 Contact Us":
+    if message.text == "\U0001f4ac Contact Us":
             # User clicked "Contact Us" button - show admin bot link
             first_name = update.effective_user.first_name or "there"
-            
-            help_message = f"""
-❓ **Need Help?** ❓
 
-Hello {first_name}! 👋
+            help_message = f"""
+\u2753 **Need Help?** \u2753
+
+Hello {first_name}! \U0001f44b
 
 If you're facing any issues or have questions, you can contact our admin!
 
-📞 **Contact Admin Bot:**
+\U0001f4de **Contact Admin Bot:**
 Click the button below to message our admin support bot.
 
-👨‍💼 **Admin Support Available**
+\U0001f468\u200d\U0001f4bc **Admin Support Available**
 
 Your message will be forwarded to the admin, and they will reply to you directly!
             """
-            
-            # Create button to admin bot
-            keyboard = [[InlineKeyboardButton("💬 Contact Admin", url="https://t.me/videos69Admin_Bot")]]
+
+            keyboard = [[InlineKeyboardButton("\U0001f4ac Contact Admin", url="https://t.me/videos69Admin_Bot")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            
+
             await message.reply_text(
                 help_message,
                 parse_mode='Markdown',
                 reply_markup=reply_markup
             )
-
-            return
-    
-    # If not a menu button, ignore other text messages (no forwarding to admin from main bot)
-    # Admin communication happens through the separate admin bot
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1531,6 +1524,32 @@ async def post_shutdown(application: Application):
     print("✅ Shutdown complete — all data flushed, connections closed")
 
 
+async def handle_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Real-time membership enforcement via Telegram chat_member updates.
+
+    When a user leaves or is kicked from a mandatory channel, Telegram pushes
+    this event immediately. We evict their _membership_cache entry so the next
+    video request triggers a fresh API check and blocks them instantly.
+    """
+    chat_member = update.chat_member
+    if not chat_member:
+        return
+
+    # Only care about our two mandatory channels
+    chat_id = chat_member.chat.id
+    if chat_id not in (MANDATORY_CHANNEL, MANDATORY_CHANNEL_2):
+        return
+
+    user_id    = chat_member.new_chat_member.user.id
+    new_status = chat_member.new_chat_member.status
+
+    # User left or was kicked — drop their cache entry immediately
+    if new_status in ('left', 'kicked', 'banned'):
+        _membership_cache.pop(user_id, None)
+        ch_name = "Channel 1" if chat_id == MANDATORY_CHANNEL else "Channel 2"
+        print(f"🔔 User {user_id} left {ch_name} — cache evicted, will be blocked on next request")
+
+
 def main():
     """Start the bot"""
     print("🤖 Starting Videos Bot System...")
@@ -1590,18 +1609,23 @@ def main():
             .build()
         )
         
-        # Add command handlers
         application.add_handler(CommandHandler("start", start_command))
         application.add_handler(CommandHandler("help", help_command))
-        
+
         # Add callback query handler for buttons
         application.add_handler(CallbackQueryHandler(button_callback))
-        
+
         # Add message handler for persistent menu buttons
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_messages))
-        
-        # Channel post handler disabled - using random message IDs
-        
+
+        # Real-time membership enforcement:
+        # When a user leaves or is kicked from a mandatory channel, Telegram sends
+        # a chat_member update. We immediately evict their cache entry so the
+        # next video request triggers a fresh API check and blocks them instantly.
+        application.add_handler(ChatMemberHandler(
+            handle_chat_member_update,
+            ChatMemberHandler.CHAT_MEMBER
+        ))
         # Schedule broadcast every 24 hours at midnight IST
         # Calculate seconds until next midnight IST for first broadcast
         now_utc = _now_utc()
