@@ -3,6 +3,7 @@ import random
 import json
 import subprocess
 import sys
+import time as _time
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
@@ -10,19 +11,19 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from telegram.request import HTTPXRequest
 import aiohttp
 import hashlib
+import asyncio
 import aiosqlite
 
 # Import persistent user state storage (SQLite-backed)
 from user_state_storage import (
     load_user_states,
     save_user_states,
-    save_user_state,
     init_db,
     start_flush_loop,
     stop_flush_loop,
+    close_persistent_db,
     init_user_state_data,
     cleanup_expired_data,
-    get_premium_users_count,
     get_stats
 )
 
@@ -39,34 +40,28 @@ CHANNEL_IDENTIFIER = CHANNEL_ID if CHANNEL_ID else f"@{CHANNEL_USERNAME}"
 # Admin configuration for support system
 ADMIN_USER_ID = 7708376300  # Admin's Telegram user ID (https://t.me/Deep12048)
 
-# Configure request with optimized settings for a Telegram bot
-# Keep pool small — large pools consume OS resources and cause CPU overhead
+# Configure request — tuned for t4g.medium (2 ARM vCPU, 4 GB RAM)
 request = HTTPXRequest(
-    connection_pool_size=8,   # 8 is plenty for a single-bot setup
+    connection_pool_size=4,   # t4g ARM: 4 connections is optimal for 2 vCPUs
     connect_timeout=15.0,
     read_timeout=15.0,
     write_timeout=15.0,
     pool_timeout=5.0
 )
 
-# Store video message IDs
-video_messages = []
-
-# Rate limiting: keep low so the event loop stays responsive
-from asyncio import Semaphore
-MAX_CONCURRENT_REQUESTS = 8   # Only 8 handlers at once; more = CPU contention
-request_semaphore = Semaphore(MAX_CONCURRENT_REQUESTS)
+# 8 concurrent handlers — Telegram bottlenecks at 30 msg/sec anyway;
+# more coroutines = more memory, zero throughput gain
+MAX_CONCURRENT_REQUESTS = 8
+request_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
 
 # Load user states from persistent storage (replaces in-memory dictionary)
 # Structure: {user_id: {'seen_videos': [], 'hourly_count': 0, 'last_reset': datetime, 'premium_until': datetime}}
 user_states = load_user_states()
 
-# Track used tokens to prevent link reuse (this can be in-memory as tokens are single-use)
-used_tokens = set()
-
-# Track all users who have started the bot (for broadcasting)
-all_users = set()
+# Track used tokens to prevent link reuse (bounded to prevent unbounded memory growth)
+used_tokens: set = set()
+_MAX_USED_TOKENS = 10000  # Evict oldest when this limit is reached
 
 # Video limit for free users (resets every 24 hours)
 DAILY_VIDEO_LIMIT = 3  # Free users can watch 3 videos per day
@@ -80,34 +75,46 @@ PREMIUM_DOWNLOADABLE_VIDEOS_LIMIT = 20
 # VPLinks API Configuration
 VPLINK_API_TOKEN = "686ddc23e543449e56029d3de0a59e19677617de"
 VPLINK_API_URL = "https://vplink.in/api"
-# AroLinks API Configuration
-AROLINK_API_TOKEN = "cf0c76a4739d65e08d5990b0db1865b680f1de4a"
-AROLINK_API_URL = "https://arolinks.com/api"
-# Round-robin counter: 0 = VPLinks next, 1 = AroLinks next
-_link_service_counter = 0
 # Bot username for deep links (from .env)
 BOT_USERNAME = os.getenv('BOT_USERNAME', 'Test_videos69_bot')
-# Secret key for encrypting verification tokens
-SECRET_KEY = "your_secret_key_here_change_this"  # Change this to a random secret
+# Secret key for encrypting verification tokens — load from .env
+SECRET_KEY = os.getenv('SECRET_KEY', 'change-this-in-your-dotenv-file')
 
 # Message ID range configuration (from .env)
 MIN_MESSAGE_ID = 1
 MAX_MESSAGE_ID = int(os.getenv('MAX_MESSAGE_ID', '10'))  # Maximum message ID in your channel
 
-# Pre-built frozenset of all video IDs — computed ONCE at startup, reused forever.
-# This avoids rebuilding a 10k-element set on every single get_random_video() call.
+# Pre-built frozenset of all video IDs — computed ONCE at startup.
 _ALL_VIDEO_IDS: frozenset = frozenset(range(MIN_MESSAGE_ID, MAX_MESSAGE_ID + 1))
+_TOTAL_VIDEOS: int = len(_ALL_VIDEO_IDS)          # cached length, avoids len() call per request
+_FAST_PATH_THRESHOLD: int = int(_TOTAL_VIDEOS * 0.8)  # integer, avoids float multiply per request
 
-# Mandatory channel to join (forced subscription)
-# For private channels, you need to use the numeric chat ID (get it from @userinfobot)
-# For public channels, use @channelname
-MANDATORY_CHANNEL = -1003827947228  # Backup Videos69
-MANDATORY_CHANNEL_LINK = "https://t.me/+8MA7MsUSTD0zZDMx"
+# Module-level IST offset — avoids re-creating timedelta on EVERY request
+_IST_OFFSET = timedelta(hours=5, minutes=30)
+
+# One-second resolution datetime.now() cache — avoids repeated syscalls per request
+_now_cache: list = [None, 0.0]  # [cached_dt, cached_at_monotonic]
+
+def _now_utc() -> datetime:
+    """Return datetime.now(timezone.utc) cached at 1-second resolution.
+    Eliminates 3-5 syscalls per request replaced by 1 per second globally.
+    """
+    mono = _time.monotonic()
+    if mono - _now_cache[1] >= 1.0:
+        _now_cache[0] = datetime.now(timezone.utc)
+        _now_cache[1] = mono
+    return _now_cache[0]
+
+# Mandatory channels — users must join BOTH to use the bot
+MANDATORY_CHANNEL        = -1003827947228           # Channel 1: Backup Videos69
+MANDATORY_CHANNEL_LINK   = "https://t.me/+8MA7MsUSTD0zZDMx"
+MANDATORY_CHANNEL_2      = -1003756311531           # Channel 2: Backup Videos69
+MANDATORY_CHANNEL_2_LINK = "https://t.me/+FNojYwJtXSk2MGRl"
 
 # ── Bot users registry (persisted in user_states.db, 'bot_users' table) ──────
 # All reads come from _users_cache (instant, no I/O).
 # Writes mark the user dirty; the shared flush loop in user_state_storage.py
-# writes dirty users to SQLite every 10 seconds.
+# Writes mark the user dirty; _bot_users_flush_loop writes to SQLite every 30 seconds.
 OLD_USERS_JSON = "users.json"      # migrated automatically if still present
 
 _users_cache: dict[int, dict] = {}  # {user_id: {first_name, username, ...}}
@@ -162,8 +169,8 @@ async def _migrate_users_json(db):
                 "user_id":     uid,
                 "first_name":  u.get("first_name", ""),
                 "username":    u.get("username"),
-                "joined_date": u.get("joined_date", datetime.now(timezone.utc).isoformat()),
-                "last_seen":   u.get("last_seen",   datetime.now(timezone.utc).isoformat()),
+                "joined_date": u.get("joined_date", _now_utc().isoformat()),
+                "last_seen":   u.get("last_seen",   _now_utc().isoformat()),
             }
             await db.execute("""
                 INSERT OR IGNORE INTO bot_users
@@ -181,52 +188,61 @@ async def _migrate_users_json(db):
         print(f"⚠️ users.json migration error: {e}")
 
 
+_users_persistent_db = None   # reused connection for bot_users flushes
+
 async def _flush_users_to_db():
-    """Write dirty users to bot_users table (called by flush loop)."""
+    """Write dirty users to bot_users table — reuses a persistent connection."""
+    global _users_persistent_db
     if not _users_dirty:
         return
     to_save = list(_users_dirty)
     _users_dirty.clear()
     try:
-        async with aiosqlite.connect("user_states.db") as db:
-            await db.execute("PRAGMA journal_mode=WAL")
-            for uid in to_save:
-                if uid not in _users_cache:
-                    continue
-                u = _users_cache[uid]
-                await db.execute("""
-                    INSERT INTO bot_users
-                        (user_id, first_name, username, joined_date, last_seen)
-                    VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT(user_id) DO UPDATE SET
-                        first_name  = excluded.first_name,
-                        username    = excluded.username,
-                        last_seen   = excluded.last_seen
-                """, (uid, u["first_name"], u["username"],
-                      u["joined_date"], u["last_seen"]))
-            await db.commit()
+        if _users_persistent_db is None:
+            _users_persistent_db = await aiosqlite.connect("user_states.db")
+            await _users_persistent_db.execute("PRAGMA journal_mode=WAL")
+            await _users_persistent_db.execute("PRAGMA synchronous=NORMAL")
+        for uid in to_save:
+            if uid not in _users_cache:
+                continue
+            u = _users_cache[uid]
+            await _users_persistent_db.execute("""
+                INSERT INTO bot_users
+                    (user_id, first_name, username, joined_date, last_seen)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    first_name  = excluded.first_name,
+                    username    = excluded.username,
+                    last_seen   = excluded.last_seen
+            """, (uid, u["first_name"], u["username"],
+                  u["joined_date"], u["last_seen"]))
+        await _users_persistent_db.commit()
     except Exception as e:
         _users_dirty.update(to_save)
-        print(f"⚠️ users DB flush error: {e}")
+        try:
+            if _users_persistent_db:
+                await _users_persistent_db.close()
+        except Exception:
+            pass
+        _users_persistent_db = None
+
+# ── Bot-users background flush loop (mirrors user_state_storage flush loop) ──────
+_bot_users_flush_task = None
+
+async def _bot_users_flush_loop():
+    """Flush dirty bot_users to SQLite every 30 seconds."""
+    while True:
+        try:
+            await asyncio.sleep(30)
+            await _flush_users_to_db()
+        except asyncio.CancelledError:
+            await _flush_users_to_db()   # final forced flush on shutdown
+            break
+        except Exception as e:
+            print(f"⚠️ bot_users flush error: {e}")
 
 
 # ── Public functions (same signatures as before) ─────────────────────────────
-def load_users_from_file():
-    """Return in-memory cache (populated at startup by init_db)."""
-    return list(_users_cache.values())
-
-
-def save_users_to_file(users_data):
-    """
-    Legacy compatibility shim — marks all provided users dirty.
-    The background flush loop handles the actual DB write every 10 seconds.
-    """
-    for u in users_data:
-        uid = u.get("user_id")
-        if uid:
-            _users_cache[uid] = u
-            _users_dirty.add(uid)
-    # Do NOT create_task here — the flush loop handles it every 10s
 
 
 def add_user_to_file(user_id: int, first_name: str, username=None) -> bool:
@@ -239,12 +255,12 @@ def add_user_to_file(user_id: int, first_name: str, username=None) -> bool:
         if u["first_name"] != first_name or u.get("username") != username:
             u["first_name"] = first_name
             u["username"]   = username
-            u["last_seen"]  = datetime.now(timezone.utc).isoformat()
+            u["last_seen"]  = _now_utc().isoformat()  # reuse cached now
             _users_dirty.add(user_id)
         return False  # Existing user — no task needed
 
     # New user
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = _now_utc().isoformat()  # reuse cached now — no extra syscall
     _users_cache[user_id] = {
         "user_id":     user_id,
         "first_name":  first_name,
@@ -278,16 +294,24 @@ def batch_remove_users(user_ids_to_remove):
         _users_dirty.discard(uid)
 
     async def _delete_from_db():
+        _opened_own = False
+        db = _users_persistent_db
         try:
-            async with aiosqlite.connect("user_states.db") as db:
-                await db.executemany(
-                    "DELETE FROM bot_users WHERE user_id = ?",
-                    [(uid,) for uid in remove_set]
-                )
-                await db.commit()
-            print(f"🗑️ Removed {len(remove_set)} users from DB")
+            if db is None:
+                db = await aiosqlite.connect("user_states.db")
+                await db.execute("PRAGMA journal_mode=WAL")
+                _opened_own = True
+            await db.executemany(
+                "DELETE FROM bot_users WHERE user_id = ?",
+                [(uid,) for uid in remove_set]
+            )
+            await db.commit()
+            print(f"🗑️ Removed {len(remove_set)} blocked users from DB")
         except Exception as e:
             print(f"⚠️ Error removing users from DB: {e}")
+        finally:
+            if _opened_own and db:
+                await db.close()
 
     try:
         loop = asyncio.get_running_loop()
@@ -302,11 +326,11 @@ _membership_cache: dict[int, tuple[bool, float]] = {}
 MEMBERSHIP_CACHE_TTL = 300  # seconds (5 minutes)
 
 async def check_channel_membership(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
-    """Check if user is a member of the mandatory channel.
-    Result is cached for 5 minutes to avoid expensive get_chat_member calls.
+    """Check if user is a member of BOTH mandatory channels.
+    Both checks run in parallel (asyncio.gather) — same latency as checking one.
+    Result cached for 5 minutes.
     """
-    import time
-    now = time.monotonic()
+    now = _time.monotonic()
 
     # Return cached result if still fresh
     cached = _membership_cache.get(user_id)
@@ -315,25 +339,33 @@ async def check_channel_membership(context: ContextTypes.DEFAULT_TYPE, user_id: 
         if now < expires_at:
             return is_member
 
-    # Cache miss — call Telegram API
-    try:
-        member = await context.bot.get_chat_member(
-            chat_id=MANDATORY_CHANNEL, user_id=user_id
-        )
-        status = member.status
-        is_member = status in ('member', 'administrator', 'creator')
-        _membership_cache[user_id] = (is_member, now + MEMBERSHIP_CACHE_TTL)
-        return is_member
-    except Exception as e:
-        error_msg = str(e).lower()
-        if any(kw in error_msg for kw in
-               ('bot is not a member', 'chat not found', 'bot was kicked',
-                'forbidden', 'have no rights')):
-            print(f"⚠️ Bot may not be admin in mandatory channel! Add bot as admin.")
-            _membership_cache[user_id] = (True, now + MEMBERSHIP_CACHE_TTL)
-            return True
-        print(f"❌ MEMBERSHIP CHECK ERROR for user {user_id}: {e}")
-        return False
+    # Evict stale entries if cache is too large
+    if len(_membership_cache) > 50000:
+        cutoff = now - MEMBERSHIP_CACHE_TTL
+        stale = [k for k, (_, exp) in _membership_cache.items() if exp < cutoff]
+        for k in stale:
+            del _membership_cache[k]
+
+    async def _check_one(channel_id: int) -> bool:
+        """Check membership for one channel. Returns True on API errors (fail-open)."""
+        try:
+            member = await context.bot.get_chat_member(chat_id=channel_id, user_id=user_id)
+            return member.status in ('member', 'administrator', 'creator')
+        except Exception as e:
+            err = str(e).lower()
+            if any(kw in err for kw in ('bot is not a member', 'chat not found',
+                                        'bot was kicked', 'forbidden', 'have no rights')):
+                return True   # Bot not admin — fail open so users aren't stuck
+            return False
+
+    # Check BOTH channels in parallel — same network cost as checking one
+    r1, r2 = await asyncio.gather(
+        _check_one(MANDATORY_CHANNEL),
+        _check_one(MANDATORY_CHANNEL_2),
+    )
+    is_member = r1 and r2
+    _membership_cache[user_id] = (is_member, now + MEMBERSHIP_CACHE_TTL)
+    return is_member
 
 
 def get_main_menu_keyboard():
@@ -372,94 +404,83 @@ async def load_videos_from_channel(application: Application):
 
 def get_random_video(user_id: int) -> int:
     """Return a random unseen video message ID for the user.
-    Uses the pre-built _ALL_VIDEO_IDS frozenset (built once at startup)
-    and set difference operations — O(n) but with zero allocation for all_ids.
+
+    Strategy:
+    - FAST PATH (O(1) average): if user has seen <80% of videos, just pick
+      random IDs from the pre-built list and check against in-memory sets.
+      Statistically finds an unseen video in 1-3 tries for most users.
+    - SLOW PATH (O(n) fallback): when user is near the end of the catalog,
+      compute the exact set difference and pick from remaining videos.
     """
     if user_id not in user_states:
         init_user_state(user_id)
 
-    user_state = user_states[user_id]
-    seen_set   = set(user_state.get('seen_videos', []))
-    failed_set = set(user_state.get('failed_message_ids', []))
-    unseen     = _ALL_VIDEO_IDS - seen_set - failed_set
+    user_state  = user_states[user_id]
+    seen        = user_state.get('seen_videos', set())        # already a set
+    failed      = user_state.get('failed_message_ids', set()) # already a set
+    seen_count  = len(seen)
 
+    # ── FAST PATH: probabilistic sampling ──────────────────────────────────
+    if seen_count < _FAST_PATH_THRESHOLD:  # integer compare, no float multiply
+        for _ in range(50):
+            vid = random.randrange(MIN_MESSAGE_ID, MAX_MESSAGE_ID + 1)  # O(1)
+            if vid not in seen and vid not in failed:  # O(1) set lookup
+                return vid
+        # Fell through 50 tries (very unlikely) — fall to slow path
+
+    # ── SLOW PATH: exact set difference (only when near end of catalog) ───
+    unseen = _ALL_VIDEO_IDS - seen - failed
     if not unseen:
-        user_state['seen_videos'] = []
-        unseen = _ALL_VIDEO_IDS - failed_set
+        seen.clear()                     # reset without reallocating the set
+        unseen = _ALL_VIDEO_IDS - failed
         if not unseen:
-            user_state['failed_message_ids'] = []
+            failed.clear()
             unseen = _ALL_VIDEO_IDS
 
-    return random.choice(tuple(unseen))
+    return random.choice(list(unseen))
 
 
 
 
 def mark_video_as_seen(user_id: int, video_id: int):
-    """Mark a video as seen by the user."""
+    """Mark a video as seen. seen_videos is a set — .add() is O(1)."""
     if user_id not in user_states:
         init_user_state(user_id)
-    seen = user_states[user_id]['seen_videos']
-    if video_id not in seen:
-        seen.append(video_id)
-        save_user_states(user_states, _hint_uid=user_id)  # only dirty this one user
+    user_states[user_id]['seen_videos'].add(video_id)   # set.add: O(1), no dup check
+    save_user_states(user_states, _hint_uid=user_id)
 
 
 def init_user_state(user_id):
-    """Initialize user state with default values"""
-    global user_states
+    """Initialize user state with default values if not present."""
     if user_id not in user_states:
-        # Use the persistent storage module to initialize
         init_user_state_data(user_id, user_states)
-        print(f"✨ Initialized new user state for user {user_id}")
 
 
-def is_premium_user(user_id):
-    """Check if user has active premium access"""
+def is_premium_user(user_id: int) -> bool:
+    """Return True if user has active premium. Uses cached _now_utc() — zero syscall."""
     if user_id not in user_states:
         init_user_state(user_id)
-    
     premium_until = user_states[user_id].get('premium_until')
-    if premium_until and datetime.now(timezone.utc) < premium_until:
-        return True
-    return False
+    return bool(premium_until) and _now_utc() < premium_until
 
 
-def check_and_reset_daily_limit(user_id):
-    """Check if limit needs to be reset (every 24 hours at midnight IST)"""
+def check_and_reset_daily_limit(user_id: int) -> bool:
+    """Check if daily limit needs reset (at midnight IST). Uses _IST_OFFSET constant."""
     if user_id not in user_states:
         init_user_state(user_id)
-    
     user_state = user_states[user_id]
-    now = datetime.now(timezone.utc)
-    
-    # Convert to IST for period calculation
-    now_ist = utc_to_ist(now)
-    
-    # Calculate the start of the current day in IST (00:00 IST)
+    now = _now_utc()
+    now_ist = now + _IST_OFFSET
     current_day_start_ist = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
-    
-    # Convert back to UTC for storage
-    current_day_start = current_day_start_ist - timedelta(hours=5, minutes=30)
-    
-    # Reset if we've moved to a new day
+    current_day_start = current_day_start_ist - _IST_OFFSET
     if current_day_start > user_state['last_reset']:
         user_state['hourly_count'] = 0
         user_state['downloaded_count'] = 0
         user_state['last_reset'] = current_day_start
         save_user_states(user_states, _hint_uid=user_id)
-        print(f"🔄 Daily reset for user {user_id}")
         return True
     return False
 
-
-def can_watch_video(user_id):
-    """Check if user can watch a video (premium or within daily limit)"""
-    if is_premium_user(user_id):
-        return True
-    
-    check_and_reset_daily_limit(user_id)
-    return user_states[user_id]['hourly_count'] < DAILY_VIDEO_LIMIT
 
 
 def increment_video_count(user_id: int):
@@ -470,10 +491,9 @@ def increment_video_count(user_id: int):
     save_user_states(user_states, _hint_uid=user_id)
 
 
-def utc_to_ist(utc_time):
-    """Convert UTC datetime to IST (UTC+5:30)"""
-    ist_offset = timedelta(hours=5, minutes=30)
-    return utc_time + ist_offset
+def utc_to_ist(utc_time: datetime) -> datetime:
+    """Convert UTC datetime to IST. Uses module-level _IST_OFFSET constant."""
+    return utc_time + _IST_OFFSET
 
 
 def grant_premium_access(user_id: int):
@@ -481,12 +501,11 @@ def grant_premium_access(user_id: int):
     if user_id not in user_states:
         init_user_state(user_id)
     user_states[user_id]['premium_until'] = (
-        datetime.now(timezone.utc) + timedelta(hours=PREMIUM_DURATION_HOURS)
+        _now_utc() + timedelta(hours=PREMIUM_DURATION_HOURS)
     )
     # Invalidate membership cache so next check re-evaluates premium state
     _membership_cache.pop(user_id, None)
     save_user_states(user_states, _hint_uid=user_id)
-    print(f"💎 Premium granted to user {user_id}")
 
 
 # ── Persistent aiohttp session (created once, reused for all HTTP requests) ──────
@@ -497,7 +516,7 @@ async def _get_http_session() -> aiohttp.ClientSession:
     """Return the shared aiohttp session, creating it if needed."""
     global _http_session
     if _http_session is None or _http_session.closed:
-        connector = aiohttp.TCPConnector(limit=10, ttl_dns_cache=300)
+        connector = aiohttp.TCPConnector(limit=4, ttl_dns_cache=300)  # 4 = enough for 1 service
         _http_session = aiohttp.ClientSession(connector=connector)
     return _http_session
 
@@ -523,99 +542,37 @@ async def _shorten_via_vplinks(bot_deep_link: str, alias: str, user_id: int) -> 
     return None
 
 
-async def _shorten_via_arolinks(bot_deep_link: str, alias: str, user_id: int) -> str | None:
-    """Try to shorten a link via AroLinks. Returns shortened URL or None."""
-    api_url = f"{AROLINK_API_URL}?api={AROLINK_API_TOKEN}&url={bot_deep_link}&alias={alias}"
-    try:
-        session = await _get_http_session()
-        async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=10)) as response:
-            if response.status == 200:
-                result = await response.json(content_type=None)
-                if result.get("status") == "success":
-                    shortened_url = result.get("shortenedUrl", "").strip()
-                    print(f"✅ [AroLinks] Shortened link for user {user_id}: {shortened_url}")
-                    return shortened_url
-                else:
-                    print(f"❌ [AroLinks] API error: {result.get('message', 'Unknown error')}")
-            else:
-                print(f"❌ [AroLinks] HTTP {response.status}")
-    except Exception as e:
-        print(f"❌ [AroLinks] Exception: {e}")
-    return None
-
-
 async def create_shortened_link(user_id):
-    """Create a unique shortened link that opens the bot with encrypted token.
-    Alternates between VPLinks and AroLinks on each call (round-robin).
-    Falls back to the other service if the selected one fails.
-    """
-    global _link_service_counter
-
+    """Create a unique shortened link via VPLinks that opens the bot with encrypted token."""
     if user_id not in user_states:
         init_user_state(user_id)
-    
+
     # Generate a unique verification token
-    timestamp = int(datetime.now().timestamp())
+    timestamp = int(_now_utc().timestamp())  # reuse cached now
     random_part = random.randint(10000, 99999)
-    
-    # Create token: user_id + timestamp + random
     token_data = f"{user_id}_{timestamp}_{random_part}"
-    
-    # Encrypt the token using SHA256
     encrypted_token = hashlib.sha256(f"{token_data}_{SECRET_KEY}".encode()).hexdigest()[:16]
-    
-    # Create the full token (we'll verify this later)
     full_token = f"{user_id}_{timestamp}_{encrypted_token}"
-    
+
     # Store the token in user state for verification
     user_states[user_id]['ad_token'] = full_token
     save_user_states(user_states, _hint_uid=user_id)
-    
+
     # Create Telegram bot deep link
     bot_deep_link = f"https://t.me/{BOT_USERNAME}?start={full_token}"
-    
-    # Unique alias for the short link
     alias = f"v_{user_id}_{timestamp}"
-    
-    # --- Round-robin: pick which service goes first this request ---
-    use_vplinks_first = (_link_service_counter % 2 == 0)
-    _link_service_counter += 1
-    service_order = ("VPLinks", "AroLinks") if use_vplinks_first else ("AroLinks", "VPLinks")
-    print(f"🔗 Link service this request: {service_order[0]} (fallback: {service_order[1]}) | counter={_link_service_counter}")
-    
-    # Try primary service
-    if use_vplinks_first:
-        shortened_url = await _shorten_via_vplinks(bot_deep_link, alias, user_id)
-        if not shortened_url:
-            print(f"⚠️ VPLinks failed, trying AroLinks as fallback...")
-            shortened_url = await _shorten_via_arolinks(bot_deep_link, alias + "a", user_id)
-    else:
-        shortened_url = await _shorten_via_arolinks(bot_deep_link, alias, user_id)
-        if not shortened_url:
-            print(f"⚠️ AroLinks failed, trying VPLinks as fallback...")
-            shortened_url = await _shorten_via_vplinks(bot_deep_link, alias + "v", user_id)
-    
+
+    shortened_url = await _shorten_via_vplinks(bot_deep_link, alias, user_id)
+
     if shortened_url:
-        # Store the shortened link in user state
         user_states[user_id]['ad_link'] = shortened_url
         save_user_states(user_states, _hint_uid=user_id)
-        print(f"   Token: {full_token}")
         return shortened_url
-    
-    print(f"❌ Both link services failed for user {user_id}")
+
+    print(f"❌ VPLinks failed for user {user_id}")
     return None
 
 
-
-def validate_ad_link(user_id, clicked_link):
-    """Validate if the clicked link matches the user's assigned link"""
-    if user_id not in user_states:
-        return False
-    
-    stored_link = user_states[user_id].get('ad_link')
-    if stored_link and stored_link == clicked_link:
-        return True
-    return False
 
 async def delete_messages(context: ContextTypes.DEFAULT_TYPE):
     """Delete messages after 20 minutes"""
@@ -627,10 +584,8 @@ async def delete_messages(context: ContextTypes.DEFAULT_TYPE):
     for message_id in message_ids:
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-        except Exception as e:
-            print(f"⚠️ Could not delete message {message_id}: {e}")
-    
-    print(f"🗑️ Deleted {len(message_ids)} messages in chat {chat_id}")
+        except Exception:
+            pass  # Silently ignore — message may already be deleted
     
     # No notification message - keep the chat clean!
 
@@ -642,10 +597,8 @@ async def broadcast_daily_reset(context: ContextTypes.DEFAULT_TYPE):
     print("🔔 DAILY RESET BROADCAST TRIGGERED!")
     print("=" * 60)
     
-    # Get current time in IST
-    from datetime import datetime, timedelta, timezone
-    ist_offset = timedelta(hours=5, minutes=30)
-    current_time_ist = datetime.now(timezone.utc) + ist_offset
+    # Get current time in IST — use module-level cache and constant
+    current_time_ist = _now_utc() + _IST_OFFSET
     time_str = current_time_ist.strftime('%I:00 %p')  # e.g., "12:00 AM"
     date_str = current_time_ist.strftime('%B %d, %Y')  # e.g., "February 6, 2026"
     
@@ -687,22 +640,15 @@ async def broadcast_daily_reset(context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=reply_markup
             )
             successful += 1
-            
-            # Add delay to avoid hitting rate limits (increased for stability)
-            import asyncio
-            await asyncio.sleep(0.2)  # 200ms delay between messages (safer under load)
+            await asyncio.sleep(0.05)  # 50ms delay — Telegram allows ~30 msg/sec per token
 
             
         except Exception as e:
             failed += 1
-            # User might have blocked the bot or deleted their account
-            print(f"⚠️ Could not send broadcast to user {user_id}: {e}")
             
             # Track blocked users to remove from file
             if "Forbidden" in str(e) or "blocked" in str(e).lower():
                 blocked_users.append(user_id)
-                # Also remove from in-memory set
-                all_users.discard(user_id)
     
     # Remove blocked users from file (batch operation - very efficient)
     if blocked_users:
@@ -719,20 +665,10 @@ async def broadcast_daily_reset(context: ContextTypes.DEFAULT_TYPE):
 async def rate_limited_send_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                                    chat_id=None, user_id=None):
     """Rate-limited wrapper for send_random_video to prevent overload"""
-    import time
-    
     async with request_semaphore:
-        start_time = time.time()
         try:
             await send_random_video(update, context, chat_id, user_id)
-            duration = time.time() - start_time
-            
-            # Log slow requests for monitoring
-            if duration > 2.0:
-                print(f"⚠️ Slow request: {duration:.2f}s for user {user_id}")
-                
-        except Exception as e:
-            print(f"⚠️ Error in rate-limited send: {e}")
+        except Exception:
             # Send user-friendly error message
             try:
                 await context.bot.send_message(
@@ -756,56 +692,51 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         is_member = await check_channel_membership(context, user_id)
         
         if not is_member:
-            # User hasn't joined or left the channel - show join message
+            # User hasn't joined one or both channels — show both join buttons
             keyboard = [
-                [InlineKeyboardButton("📢 Join Channel", url=MANDATORY_CHANNEL_LINK)],
-                [InlineKeyboardButton("🔄 Refresh", callback_data='check_membership')]
+                [InlineKeyboardButton("📢 Join Channel 1", url=MANDATORY_CHANNEL_LINK)],
+                [InlineKeyboardButton("📢 Join Channel 2", url=MANDATORY_CHANNEL_2_LINK)],
+                [InlineKeyboardButton("🔄 I've Joined Both — Verify", callback_data='check_membership')]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            
             await context.bot.send_message(
                 chat_id=chat_id,
                 text="🔒 **Channel Membership Required!**\n\n"
-                     "You must join our channel to use this bot.\n\n"
-                     "📢 **Steps**:\n"
-                     "1. Click 'Join Channel' button below\n"
-                     "2. Join the channel\n"
-                     "3. Click 'Refresh' button to verify\n\n"
-                     "After joining, you can watch videos! 🎬",
+                     "You must join **both** channels to use this bot.\n\n"
+                     "📢 **Steps:**\n"
+                     "1️⃣ Click **Join Channel 1** and join\n"
+                     "2️⃣ Click **Join Channel 2** and join\n"
+                     "3️⃣ Click **Verify** to confirm\n\n"
+                     "After joining both, you can watch videos! 🎬",
                 parse_mode='Markdown',
                 reply_markup=reply_markup
             )
-            return  # Stop here - don't send video
+            return
         
-        # Check if user can watch videos (daily limit or premium)
-        if not can_watch_video(user_id):
+        # Compute is_premium ONCE — no double call into can_watch_video
+        is_premium = is_premium_user(user_id)
+        if not is_premium:
+            check_and_reset_daily_limit(user_id)  # reset counter if new day
+        can_watch = is_premium or user_states[user_id]['hourly_count'] < DAILY_VIDEO_LIMIT
+
+        if not can_watch:
             # Check if user had premium that expired
-            if user_id in user_states and user_states[user_id].get('premium_until'):
+            if not is_premium and user_states.get(user_id, {}).get('premium_until'):
                 premium_until = user_states[user_id]['premium_until']
-                if datetime.now(timezone.utc) >= premium_until:
-                    # Premium has expired - calculate next daily reset
-                    now = datetime.now(timezone.utc)
-                    now_ist = utc_to_ist(now)
-                    
-                    # Calculate next day at midnight (00:00 IST)
+                now = _now_utc()
+                if now >= premium_until:
+                    now_ist = now + _IST_OFFSET
                     next_reset_ist = (now_ist + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-                    
-                    # Convert back to UTC for time calculation
-                    next_reset = next_reset_ist - timedelta(hours=5, minutes=30)
-                    
+                    next_reset = next_reset_ist - _IST_OFFSET
                     time_until_reset = next_reset - now
                     minutes_until_reset = int(time_until_reset.total_seconds() / 60)
                     hours_until_reset = int(time_until_reset.total_seconds() / 3600)
-                    
-                    # Format time until reset
                     if hours_until_reset > 0:
                         time_msg = f"{hours_until_reset} hour(s) and {minutes_until_reset % 60} minute(s)"
                     else:
                         time_msg = f"{minutes_until_reset} minute(s)"
-                    
                     keyboard = [[InlineKeyboardButton("📺 Watch Ad", callback_data='watch_ad')]]
                     reply_markup = InlineKeyboardMarkup(keyboard)
-                    
                     await context.bot.send_message(
                         chat_id=chat_id,
                         text=f"⏰ **Premium Access Expired!**\n\n"
@@ -819,31 +750,21 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                         reply_markup=reply_markup
                     )
                     return
-            
-            # Regular limit reached (no premium or never had premium)
-            # Calculate next daily reset time (midnight)
-            now = datetime.now(timezone.utc)
-            now_ist = utc_to_ist(now)
-            
-            # Calculate next day at midnight (00:00 IST)
+
+            # Regular daily limit reached
+            now = _now_utc()
+            now_ist = now + _IST_OFFSET
             next_reset_ist = (now_ist + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-            
-            # Convert back to UTC for time calculation
-            next_reset = next_reset_ist - timedelta(hours=5, minutes=30)
-            
+            next_reset = next_reset_ist - _IST_OFFSET
             time_until_reset = next_reset - now
             minutes_until_reset = int(time_until_reset.total_seconds() / 60)
             hours_until_reset = int(time_until_reset.total_seconds() / 3600)
-            
-            keyboard = [[InlineKeyboardButton("📺 Watch Ad", callback_data='watch_ad')]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            # Format time until reset
             if hours_until_reset > 0:
                 time_msg = f"{hours_until_reset} hour(s) and {minutes_until_reset % 60} minute(s)"
             else:
                 time_msg = f"{minutes_until_reset} minute(s)"
-            
+            keyboard = [[InlineKeyboardButton("📺 Watch Ad", callback_data='watch_ad')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=f"❌ **Daily Limit Reached!**\n\n"
@@ -864,18 +785,10 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         
         for attempt in range(max_attempts):
             try:
-                # Get a random message ID
                 message_id = get_random_video(user_id)
-                
-                # Initialize downloaded_count if it doesn't exist (for existing users)
-                if 'downloaded_count' not in user_states[user_id]:
-                    user_states[user_id]['downloaded_count'] = 0
-                    save_user_states(user_states)
-                
-                downloaded_count = user_states[user_id]['downloaded_count']
-                
-                # Determine download limit based on premium status
-                is_premium = is_premium_user(user_id)
+
+                # is_premium already computed above — reuse it, no extra syscall
+                downloaded_count = user_states[user_id].get('downloaded_count', 0)
                 download_limit = PREMIUM_DOWNLOADABLE_VIDEOS_LIMIT if is_premium else DOWNLOADABLE_VIDEOS_LIMIT
                 can_show_download_button = downloaded_count < download_limit
                 
@@ -949,7 +862,7 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                         warning_text = (
                             f"👆 Enjoy the video!\n\n"
                             f"🔒 Download limit reached ({download_limit} videos).\n\n"
-                            f"💎 **Want 20 downloads per hour?**\n"
+                            f"💎 **Want 20 downloads per day?**\n"
                             f"Watch an ad for Premium Access:\n"
                             f"✅ Unlimited videos + 20 downloads!\n\n"
                             f"⚠️ This video will be deleted after 20 minutes."
@@ -974,10 +887,9 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 
             except Exception:
                 # Message ID doesn't exist or isn't a video — mark failed and retry
-                if 'failed_message_ids' not in user_states[user_id]:
-                    user_states[user_id]['failed_message_ids'] = []
-                if message_id not in user_states[user_id]['failed_message_ids']:
-                    user_states[user_id]['failed_message_ids'].append(message_id)
+                failed_ids = user_states[user_id].setdefault('failed_message_ids', set())
+                if message_id not in failed_ids:     # O(1) set check
+                    failed_ids.add(message_id)       # O(1) set insert
                     save_user_states(user_states, _hint_uid=user_id)
                 continue
         
@@ -1011,9 +923,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     first_name = user.first_name or "there"
     username = user.username
     
-    # Track this user for broadcasting (in-memory)
-    all_users.add(user_id)
-    
     # Save user to file (persistent storage)
     add_user_to_file(user_id, first_name, username)
     
@@ -1021,25 +930,24 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_member = await check_channel_membership(context, user_id)
     
     if not is_member:
-        # User hasn't joined the channel - show join message
         keyboard = [
-            [InlineKeyboardButton("📢 Join Channel", url=MANDATORY_CHANNEL_LINK)],
-            [InlineKeyboardButton("🔄 Refresh", callback_data='check_membership')]
+            [InlineKeyboardButton("📢 Join Channel 1", url=MANDATORY_CHANNEL_LINK)],
+            [InlineKeyboardButton("📢 Join Channel 2", url=MANDATORY_CHANNEL_2_LINK)],
+            [InlineKeyboardButton("🔄 I've Joined Both — Verify", callback_data='check_membership')]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        
         await update.message.reply_text(
             f"👋 Welcome {first_name}!\n\n"
-            f"🔒 To use this bot, you must join our channel first.\n\n"
-            f"📢 **Steps**:\n"
-            f"1. Click 'Join Channel' button below\n"
-            f"2. Join the channel\n"
-            f"3. Click 'Refresh' button to verify\n\n"
-            f"After joining, you'll get full access to the bot! 🎬",
+            f"🔒 To use this bot, you must join **both** channels first.\n\n"
+            f"📢 **Steps:**\n"
+            f"1️⃣ Click **Join Channel 1** and join\n"
+            f"2️⃣ Click **Join Channel 2** and join\n"
+            f"3️⃣ Click **Verify** to confirm\n\n"
+            f"After joining both, you'll get full access! 🎬",
             parse_mode='Markdown',
             reply_markup=reply_markup
         )
-        return  # Stop here until user joins
+        return
     
     # Check if user came from ad link (deep link with token)
     if context.args and len(context.args) > 0:
@@ -1068,12 +976,15 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         # Valid token! Grant premium access
                         grant_premium_access(user_id)
                         used_tokens.add(token)  # Mark token as used
+                        # Evict old tokens if set is too large
+                        if len(used_tokens) > _MAX_USED_TOKENS:
+                            used_tokens.clear()  # wholesale clear — tokens are single-use anyway
                         
                         # Clear the stored token
                         user_states[user_id]['ad_token'] = None
                         user_states[user_id]['ad_link'] = None
                         # Save to persistent storage
-                        save_user_states(user_states)
+                        save_user_states(user_states, _hint_uid=user_id)
                         
                         # Calculate expiry time in IST
                         expiry_time_utc = user_states[user_id]['premium_until']
@@ -1117,7 +1028,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Check if user already has premium
     if is_premium_user(user_id):
         premium_until = user_states[user_id]['premium_until']
-        time_remaining = premium_until - datetime.now(timezone.utc)
+        time_remaining = premium_until - _now_utc()  # use cached now
         hours_remaining = int(time_remaining.total_seconds() / 3600)
         minutes_remaining = int((time_remaining.total_seconds() % 3600) / 60)
         
@@ -1137,7 +1048,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown',
             reply_markup=reply_markup
         )
-        print(f"✅ Premium user returned: {first_name} (ID: {user_id})")
         return
     
     # Regular welcome message for new/non-premium users
@@ -1146,10 +1056,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 Hello {first_name}! 👋
 
-I'm here to share amazing videos with you from our collection.
+I'm here to share amazing videos with you!
 
-🎥 You can watch **10 videos per hour** for free!
-⏰ Your limit resets every hour (1:00 PM, 2:00 PM, etc.)
+🎥 You can watch **3 free videos per day**!
+⏰ Your limit resets every **24 hours at midnight IST**
+
+💾 You can **download 2 videos per day**!
 
 💎 Want unlimited access? Watch an ad to get **12 hours of premium**!
 
@@ -1174,8 +1086,7 @@ Enjoy! 🍿
         "👇 Click below to get your first video:",
         reply_markup=inline_markup
     )
-    
-    print(f"✅ New user started the bot: {first_name} (ID: {user_id})")
+
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1207,7 +1118,7 @@ Your message will be forwarded to the admin, and they will reply to you directly
         parse_mode='Markdown',
         reply_markup=reply_markup
     )
-    print(f"📞 User {user.id} requested help - directed to admin bot")
+
 
 
 async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1222,8 +1133,7 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Check if it's a menu button press
     if message.text:
         if message.text == "🎬 Get New Video":
-            # User clicked "Get New Video" button
-            await send_random_video(
+            await rate_limited_send_video(
                 update,
                 context,
                 chat_id=message.chat_id,
@@ -1259,7 +1169,7 @@ Your message will be forwarded to the admin, and they will reply to you directly
                 parse_mode='Markdown',
                 reply_markup=reply_markup
             )
-            print(f"📞 User {user_id} requested help via menu button")
+
             return
     
     # If not a menu button, ignore other text messages (no forwarding to admin from main bot)
@@ -1270,29 +1180,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle button callbacks"""
     query = update.callback_query
     user_id = query.from_user.id
-    user_name = query.from_user.first_name or "Unknown"
-    button_action = query.data
-    
-    # Track if this is an old/expired callback query
-    is_old_query = False
-    
-    # Try to answer the query, but silently ignore timeout/expired errors
+
+    # Answer the query immediately (Telegram requires this within 30s)
     try:
         await query.answer()
-    except Exception as e:
-        # Silently ignore "Query is too old" and timeout errors
-        # These are expected when users click old broadcast buttons
-        if "too old" in str(e).lower() or "timeout" in str(e).lower() or "query id is invalid" in str(e).lower():
-            is_old_query = True
-            print(f"🕐 Old button clicked by {user_name} (ID: {user_id}) - Action: '{button_action}'")
-            print(f"   ✅ Processing anyway (callback query expired but action will execute)")
-        else:
-            # Log unexpected errors
-            print(f"⚠️ Unexpected callback query error: {e}")
-    
-    # Log successful fresh button clicks
-    if not is_old_query:
-        print(f"🔘 Button clicked by {user_name} (ID: {user_id}) - Action: '{button_action}'")
+    except Exception:
+        pass  # Silently ignore expired/old queries
     
     if query.data == 'check_membership':
         # User clicked refresh button - check if they joined the channel
@@ -1302,49 +1195,46 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_member = await check_channel_membership(context, user_id)
         
         if is_member:
-            # User has joined! Show welcome message
+            # User has joined both! Show welcome message
             keyboard = [[InlineKeyboardButton("🎬 Get First Video", callback_data='next_video')]]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            
             try:
                 await query.message.edit_text(
                     f"✅ **Verified!**\n\n"
                     f"Welcome {first_name}! 👋\n\n"
-                    f"You've successfully joined the channel!\n\n"
+                    f"You've successfully joined both channels!\n\n"
                     f"🎥 You can watch **3 free videos** per day!\n"
-                    f"📥 You can download **2 videos** per day!\n"
-                    f"⏰ Your limits reset every **24 hours at midnight (12:00 AM IST)**!\n\n"
-                    f"💎 Want unlimited access? Watch an ad to get **12 hours of premium**!\n\n"
+                    f"\U0001f4e5 You can download **2 videos** per day!\n"
+                    f"⏰ Limits reset every **24 hours at midnight IST**!\n\n"
+                    f"💎 Want unlimited access? Watch an ad for **12 hours of premium**!\n\n"
                     f"Click below to start watching! 🍿",
                     parse_mode='Markdown',
                     reply_markup=reply_markup
                 )
             except Exception as e:
-                # Ignore "Message is not modified" errors
                 if "Message is not modified" not in str(e):
                     print(f"⚠️ Error editing message: {e}")
         else:
-            # User still hasn't joined
+            # User still hasn't joined both channels
             keyboard = [
-                [InlineKeyboardButton("📢 Join Channel", url=MANDATORY_CHANNEL_LINK)],
-                [InlineKeyboardButton("🔄 Refresh", callback_data='check_membership')]
+                [InlineKeyboardButton("📢 Join Channel 1", url=MANDATORY_CHANNEL_LINK)],
+                [InlineKeyboardButton("📢 Join Channel 2", url=MANDATORY_CHANNEL_2_LINK)],
+                [InlineKeyboardButton("🔄 Verify Again", callback_data='check_membership')]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            
             try:
                 await query.message.edit_text(
                     f"❌ **Not Joined Yet**\n\n"
-                    f"You haven't joined the channel yet.\n\n"
-                    f"📢 **Please**:\n"
-                    f"1. Click 'Join Channel' button\n"
-                    f"2. Join the channel\n"
-                    f"3. Click 'Refresh' again\n\n"
-                    f"You must join to use this bot! 🔒",
+                    f"You haven't joined both channels yet.\n\n"
+                    f"📢 **Please:**\n"
+                    f"1️⃣ Join Channel 1\n"
+                    f"2️⃣ Join Channel 2\n"
+                    f"3️⃣ Click 'Verify Again'\n\n"
+                    f"You must join both to use this bot! 🔒",
                     parse_mode='Markdown',
                     reply_markup=reply_markup
                 )
             except Exception as e:
-                # Ignore "Message is not modified" errors
                 if "Message is not modified" not in str(e):
                     print(f"⚠️ Error editing message: {e}")
     
@@ -1369,7 +1259,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "💎 **Unlock Premium Access!**\n\n"
                 "Get premium benefits:\n"
                 "✅ **Unlimited** video watching\n"
-                "✅ **20 downloads** every 6 hours (10x more!)\n"
+                "✅ **20 downloads** per day (10x more!)\n"
                 "✅ **12 hours** of premium access\n\n"
                 "Click the button below to watch an ad and unlock premium! 🚀",
                 parse_mode='Markdown',
@@ -1382,7 +1272,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text="💎 **Unlock Premium Access!**\n\n"
                      "Get premium benefits:\n"
                      "✅ **Unlimited** video watching\n"
-                     "✅ **20 downloads** every 6 hours (10x more!)\n"
+                     "✅ **20 downloads** per day (10x more!)\n"
                      "✅ **12 hours** of premium access\n\n"
                      "Click the button below to watch an ad and unlock premium! 🚀",
                 parse_mode='Markdown',
@@ -1452,7 +1342,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Initialize downloaded_count if it doesn't exist
             if 'downloaded_count' not in user_states[user_id]:
                 user_states[user_id]['downloaded_count'] = 0
-                save_user_states(user_states)
             
             downloaded_count = user_states[user_id]['downloaded_count']
             
@@ -1504,7 +1393,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 # Increment download count
                 user_states[user_id]['downloaded_count'] += 1
-                save_user_states(user_states)
+                save_user_states(user_states, _hint_uid=user_id)
                 
                 remaining = download_limit - user_states[user_id]['downloaded_count']
                 
@@ -1590,8 +1479,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     name=f"delete_download_{query.message.chat_id}_{download_msg.message_id}"
                 )
                 
-                print(f"📥 User {user_id} downloaded video {message_id} ({remaining} downloads remaining)")
-                print(f"🗑️ Scheduled deletion of downloaded video {download_msg.message_id} in 20 minutes")
+
                 
             except Exception as e:
                 print(f"❌ Error sending downloadable video: {e}")
@@ -1630,6 +1518,32 @@ async def post_init(application: Application):
 
     # 3. Load available video IDs from the channel
     await load_videos_from_channel(application)
+
+    # 4. Start bot_users background flush loop
+    global _bot_users_flush_task
+    _bot_users_flush_task = asyncio.create_task(
+        _bot_users_flush_loop(), name="bot_users_flush"
+    )
+
+async def post_shutdown(application: Application):
+    """Clean shutdown: flush all dirty writes and close all DB/HTTP connections."""
+    # Cancel both flush loops (each catches CancelledError and does final flush)
+    stop_flush_loop()              # user_states flush loop
+    if _bot_users_flush_task and not _bot_users_flush_task.done():
+        _bot_users_flush_task.cancel()
+    await asyncio.sleep(0.5)       # give both loops time to complete final flush
+    await close_persistent_db()   # close user_states SQLite connection
+    global _http_session, _users_persistent_db
+    if _users_persistent_db:
+        try:
+            await _users_persistent_db.close()
+        except Exception:
+            pass
+        _users_persistent_db = None
+    if _http_session and not _http_session.closed:
+        await _http_session.close()
+        _http_session = None
+    print("✅ Shutdown complete — all data flushed, connections closed")
 
 
 def main():
@@ -1685,8 +1599,9 @@ def main():
         application = (
             Application.builder()
             .token(BOT_TOKEN)
-            .request(request)  # Use custom request with longer timeouts
+            .request(request)
             .post_init(post_init)
+            .post_shutdown(post_shutdown)
             .build()
         )
         
@@ -1702,21 +1617,12 @@ def main():
         
         # Channel post handler disabled - using random message IDs
         
-        # Schedule broadcast every 6 hours (00:00, 06:00, 12:00, 18:00)
-        from datetime import time
-        import pytz
-        
-        # IST timezone
-        ist_tz = pytz.timezone('Asia/Kolkata')
-        
-        # Calculate when to run the first broadcast (at the next 12-hour period start)
-        now_utc = datetime.now(timezone.utc)
-        now_ist = now_utc + timedelta(hours=5, minutes=30)
-        
-        # Calculate next midnight (00:00 IST)
+        # Schedule broadcast every 24 hours at midnight IST
+        # Calculate seconds until next midnight IST for first broadcast
+        now_utc = _now_utc()
+        now_ist = now_utc + _IST_OFFSET
         next_broadcast_ist = (now_ist + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        
-        next_broadcast_utc = next_broadcast_ist - timedelta(hours=5, minutes=30)
+        next_broadcast_utc = next_broadcast_ist - _IST_OFFSET
         
         # Calculate seconds until next midnight
         seconds_until_next_broadcast = (next_broadcast_utc - now_utc).total_seconds()
@@ -1760,8 +1666,8 @@ def main():
         
         application.run_polling(
             allowed_updates=Update.ALL_TYPES,
-            poll_interval=0.5,    # Poll every 0.5s — fast enough, avoids CPU burn from constant hammering
-            timeout=30,           # Long-poll: 30s open connection reduces API call count
+            poll_interval=1.0,    # Poll every 1s — still fast; 0.5 doubles API calls for no benefit
+            timeout=30,           # Long-poll timeout (seconds)
             drop_pending_updates=True,
         )
         

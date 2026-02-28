@@ -1,4 +1,6 @@
 import os
+import re
+import asyncio
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -107,7 +109,6 @@ async def handle_user_messages(update: Update, context: ContextTypes.DEFAULT_TYP
                         if "User ID:" in line:
                             print(f"📝 Found User ID line: {line}")
                             # Extract just the numbers from the line
-                            import re
                             match = re.search(r'User ID:\s*`?(\d+)`?', line)
                             if match:
                                 original_user_id = int(match.group(1))
@@ -164,7 +165,6 @@ async def handle_user_messages(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             
             # Schedule deletion of success message after 2 seconds
-            import asyncio
             async def delete_success_message():
                 await asyncio.sleep(2)
                 try:
@@ -212,7 +212,10 @@ def main():
         print("💬 Users can send messages, admin can reply!")
         
         # Run the bot
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,   # don't process stale messages on restart
+        )
         
     except Exception as e:
         print(f"\n❌ Error starting admin bot: {e}")

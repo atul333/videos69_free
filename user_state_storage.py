@@ -21,14 +21,18 @@ from typing import Dict, Any, Optional, Set
 # ── Config ────────────────────────────────────────────────────────────────────
 DB_FILE         = "user_states.db"
 OLD_JSON_FILE   = "user_states.json"        # migrated automatically if present
-FLUSH_INTERVAL  = 10                         # seconds between background flushes
+FLUSH_INTERVAL  = 30                         # seconds between background flushes
 MAX_SEEN_VIDEOS = 5000                       # cap per user to keep DB lean
+
+# Module-level IST offset — avoids recreating timedelta on every new user init
+_IST_OFFSET = timedelta(hours=5, minutes=30)
 
 # ── In-memory state ───────────────────────────────────────────────────────────
 _cache: Dict[int, Dict[str, Any]] = {}       # THE single source of truth for reads
 _dirty: Set[int] = set()                     # user_ids that need writing to DB
 _flush_task: Optional[asyncio.Task] = None
 _db_initialized: bool = False
+_persistent_db = None                        # reused connection (avoids open/close every flush)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -41,11 +45,15 @@ def _ser_dt(dt) -> Optional[str]:
     return dt
 
 def _des_dt(s) -> Optional[datetime]:
-    """Deserialize ISO string → datetime."""
+    """Deserialize ISO string → timezone-aware datetime (always UTC)."""
     if s is None or not isinstance(s, str):
         return None
     try:
-        return datetime.fromisoformat(s)
+        dt = datetime.fromisoformat(s)
+        # Older rows may have been stored without timezone info — assume UTC
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except ValueError:
         return None
 
@@ -115,10 +123,10 @@ async def init_db():
         await _migrate_from_json()
 
     _db_initialized = True
+    now_utc = datetime.now(timezone.utc)
     premium_count = sum(
         1 for s in _cache.values()
-        if s.get('premium_until') and _des_dt(s['premium_until']) and
-           _des_dt(s['premium_until']) > datetime.now(timezone.utc)
+        if isinstance(s.get('premium_until'), datetime) and s['premium_until'] > now_utc
     )
     print(f"🗄️  SQLite DB ready: {DB_FILE}")
     print(f"   👥 {len(_cache)} users loaded into memory cache")
@@ -127,21 +135,25 @@ async def init_db():
 
 
 async def _load_all_into_cache():
-    """Read every row from users table into _cache."""
+    """Read every row from users table into _cache.
+    seen_videos and failed_message_ids are stored as Python sets in memory
+    so get_random_video() never has to reconstruct them.
+    """
     async with aiosqlite.connect(DB_FILE) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM users") as cur:
             async for row in cur:
                 uid = row["user_id"]
                 _cache[uid] = {
-                    "seen_videos":        json.loads(row["seen_videos"] or "[]"),
+                    # ← sets in memory, serialised to lists for DB only
+                    "seen_videos":        set(json.loads(row["seen_videos"] or "[]")),
                     "hourly_count":       row["hourly_count"],
                     "last_reset":         _des_dt(row["last_reset"]),
                     "premium_until":      _des_dt(row["premium_until"]),
                     "ad_link":            row["ad_link"],
                     "ad_token":           row["ad_token"],
                     "downloaded_count":   row["downloaded_count"],
-                    "failed_message_ids": json.loads(row["failed_message_ids"] or "[]"),
+                    "failed_message_ids": set(json.loads(row["failed_message_ids"] or "[]")),
                 }
 
 
@@ -156,16 +168,16 @@ async def _migrate_from_json():
                 uid = int(uid_str)
                 sv = state.get("seen_videos", [])
                 if len(sv) > MAX_SEEN_VIDEOS:
-                    sv = sv[-MAX_SEEN_VIDEOS:]
+                    sv = list(sv)[-MAX_SEEN_VIDEOS:]  # handle list or set
                 _cache[uid] = {
-                    "seen_videos":        sv,
+                    "seen_videos":        set(sv),
                     "hourly_count":       state.get("hourly_count", 0),
                     "last_reset":         _des_dt(state.get("last_reset")),
                     "premium_until":      _des_dt(state.get("premium_until")),
                     "ad_link":            state.get("ad_link"),
                     "ad_token":           state.get("ad_token"),
                     "downloaded_count":   state.get("downloaded_count", 0),
-                    "failed_message_ids": state.get("failed_message_ids", []),
+                    "failed_message_ids": set(state.get("failed_message_ids", [])),
                 }
                 await db.execute(_UPSERT, _row_params(uid, _cache[uid]))
             await db.commit()
@@ -186,7 +198,7 @@ def start_flush_loop() -> asyncio.Task:
 
 
 async def _flush_loop():
-    """Background coroutine — flushes dirty users to SQLite every 10 seconds."""
+    """Background coroutine — flushes dirty users to SQLite every FLUSH_INTERVAL seconds."""
     while True:
         try:
             await asyncio.sleep(FLUSH_INTERVAL)
@@ -199,7 +211,10 @@ async def _flush_loop():
 
 
 async def _flush_dirty(force: bool = False):
-    """Write all dirty users to SQLite in a single transaction."""
+    """Write all dirty users to SQLite in a single transaction.
+    Reuses a persistent connection to avoid open/close overhead every cycle.
+    """
+    global _persistent_db
     if not _dirty:
         return
 
@@ -207,40 +222,64 @@ async def _flush_dirty(force: bool = False):
     _dirty.clear()                     # Clear before await so new dirties aren't lost
 
     try:
-        async with aiosqlite.connect(DB_FILE) as db:
-            await db.execute("PRAGMA journal_mode=WAL")
-            for uid in to_save:
-                if uid in _cache:
-                    await db.execute(_UPSERT, _row_params(uid, _cache[uid]))
-            await db.commit()
-        if force:
-            print(f"💾 Final flush: saved {len(to_save)} user(s) to SQLite")
+        if _persistent_db is None:
+            _persistent_db = await aiosqlite.connect(DB_FILE)
+            await _persistent_db.execute("PRAGMA journal_mode=WAL")
+            await _persistent_db.execute("PRAGMA synchronous=NORMAL")
+        for uid in to_save:
+            if uid in _cache:
+                await _persistent_db.execute(_UPSERT, _row_params(uid, _cache[uid]))
+        await _persistent_db.commit()
     except Exception as e:
         _dirty.update(to_save)         # Re-queue on failure so data isn't lost
-        print(f"⚠️ DB write error: {e}")
+        # Connection may be broken — force reconnect next cycle
+        try:
+            if _persistent_db:
+                await _persistent_db.close()
+        except Exception:
+            pass
+        _persistent_db = None
 
 
 def stop_flush_loop():
-    """Cancel the background flush task (call on shutdown)."""
+    """Cancel the background flush task (triggers final forced flush via CancelledError)."""
     if _flush_task and not _flush_task.done():
         _flush_task.cancel()
 
 
+async def close_persistent_db():
+    """Close the persistent DB connection — call from post_shutdown after stop_flush_loop."""
+    global _persistent_db
+    if _persistent_db:
+        try:
+            await _persistent_db.close()
+        except Exception:
+            pass
+        _persistent_db = None
+
+
 def _row_params(uid: int, state: Dict[str, Any]) -> tuple:
-    """Build the parameter tuple for the UPSERT statement."""
-    sv = state.get("seen_videos", [])
-    if len(sv) > MAX_SEEN_VIDEOS:
-        sv = sv[-MAX_SEEN_VIDEOS:]
+    """Build the parameter tuple for the UPSERT statement.
+    Converts in-memory sets to lists for JSON serialisation.
+    """
+    sv = state.get("seen_videos", set())
+    sv_list = list(sv) if isinstance(sv, set) else list(sv)
+    if len(sv_list) > MAX_SEEN_VIDEOS:
+        sv_list = sv_list[-MAX_SEEN_VIDEOS:]
+
+    fids = state.get("failed_message_ids", set())
+    fids_list = list(fids) if isinstance(fids, set) else list(fids)
+
     return (
         uid,
-        json.dumps(sv),
+        json.dumps(sv_list),
         state.get("hourly_count", 0),
         _ser_dt(state.get("last_reset")),
         _ser_dt(state.get("premium_until")),
         state.get("ad_link"),
         state.get("ad_token"),
         state.get("downloaded_count", 0),
-        json.dumps(state.get("failed_message_ids", [])),
+        json.dumps(fids_list),
     )
 
 
@@ -271,36 +310,35 @@ def init_user_state_data(user_id: int, states: Dict[int, Dict[str, Any]]) -> Dic
     if user_id in states:
         return states[user_id]
 
+    # last_reset = start of current day in IST (midnight), converted back to UTC
     now = datetime.now(timezone.utc)
-    ist_offset = timedelta(hours=5, minutes=30)
-    now_ist = now + ist_offset
-    period_start_ist = now_ist.replace(
-        hour=(now_ist.hour // 12) * 12, minute=0, second=0, microsecond=0
-    )
-    last_reset = period_start_ist - ist_offset
+    now_ist = now + _IST_OFFSET
+    midnight_ist = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
+    last_reset = midnight_ist - _IST_OFFSET   # store as UTC
 
     new_state = {
-        "seen_videos":        [],
+        "seen_videos":        set(),
         "hourly_count":       0,
         "last_reset":         last_reset,
         "premium_until":      None,
         "ad_link":            None,
         "ad_token":           None,
         "downloaded_count":   0,
-        "failed_message_ids": [],
+        "failed_message_ids": set(),
     }
     states[user_id] = new_state
-    save_user_state(user_id)           # Queue for DB write
+    save_user_state(user_id)
     return new_state
 
 
 def cleanup_expired_data(states: Dict[int, Dict[str, Any]]) -> int:
-    """Clear expired premium tokens. Returns number of users cleaned."""
+    """Clear expired premium tokens. premium_until is already a datetime in memory."""
     now = datetime.now(timezone.utc)
     cleaned = 0
     for uid, state in states.items():
-        puntil = _des_dt(state.get("premium_until"))
-        if puntil and now > puntil and state.get("ad_token"):
+        puntil = state.get("premium_until")
+        # Already a datetime in memory — no _des_dt() needed
+        if isinstance(puntil, datetime) and now > puntil and state.get("ad_token"):
             state["ad_token"] = None
             state["ad_link"]  = None
             save_user_state(uid)
@@ -312,7 +350,7 @@ def get_premium_users_count(states: Dict[int, Dict[str, Any]]) -> int:
     now = datetime.now(timezone.utc)
     return sum(
         1 for s in states.values()
-        if _des_dt(s.get("premium_until")) and _des_dt(s["premium_until"]) > now
+        if isinstance(s.get("premium_until"), datetime) and s["premium_until"] > now
     )
 
 
@@ -322,14 +360,14 @@ def get_stats(states: Dict[int, Dict[str, Any]]) -> Dict[str, Any]:
     prem   = 0
     videos = 0
     for s in states.values():
-        puntil = _des_dt(s.get("premium_until"))
-        if puntil and puntil > now:
+        puntil = s.get("premium_until")
+        if isinstance(puntil, datetime) and puntil > now:
             prem += 1
-        videos += len(s.get("seen_videos", []))
+        videos += len(s.get("seen_videos", set()))
     return {
-        "total_users":        total,
-        "premium_users":      prem,
-        "free_users":         total - prem,
+        "total_users":          total,
+        "premium_users":        prem,
+        "free_users":           total - prem,
         "total_videos_watched": videos,
         "avg_videos_per_user":  videos / total if total else 0,
     }
