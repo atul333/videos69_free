@@ -6,7 +6,7 @@ import sys
 import time as _time
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     ContextTypes, MessageHandler, ChatMemberHandler, filters
@@ -392,12 +392,8 @@ async def check_channel_membership(context: ContextTypes.DEFAULT_TYPE, user_id: 
     return r1 and r2, r1, r2
 
 
-def get_main_menu_keyboard():
-    """Create the persistent menu keyboard."""
-    keyboard = [
-        [KeyboardButton("💬 Contact Us")]
-    ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+# Use ReplyKeyboardRemove to clear the old cached keyboards
+_REMOVE_KEYBOARD = ReplyKeyboardRemove()
 
 
 async def load_videos_from_channel(application: Application):
@@ -1079,13 +1075,11 @@ Enjoy! 🍿
     inline_keyboard = [[InlineKeyboardButton("🎬 Get First Video", callback_data='next_video')]]
     inline_markup = InlineKeyboardMarkup(inline_keyboard)
     
-    # Get persistent menu keyboard
-    menu_keyboard = get_main_menu_keyboard()
-    
+    # Send welcome message and clear any old persistent menus
     await update.message.reply_text(
         welcome_message,
         parse_mode='Markdown',
-        reply_markup=menu_keyboard  # Show persistent menu
+        reply_markup=_REMOVE_KEYBOARD
     )
     
     # Send inline button separately
