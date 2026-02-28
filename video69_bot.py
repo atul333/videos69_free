@@ -320,52 +320,63 @@ def batch_remove_users(user_ids_to_remove):
         pass
 
 
-# ── Membership cache: avoids a Telegram API call on EVERY video request ──────
-# Format: {user_id: (is_member: bool, expires_at: float)}
-_membership_cache: dict[int, tuple[bool, float]] = {}
-MEMBERSHIP_CACHE_TTL = 300  # seconds (5 minutes)
+# ── Membership cache: stores per-channel status ───────────────────────────────
+# Format: {user_id: (r1: bool, r2: bool, expires_at: float)}
+_membership_cache: dict[int, tuple[bool, bool, float]] = {}
+MEMBERSHIP_CACHE_TTL = 60   # seconds — short so 'Verify' works within 60s of joining
 
-async def check_channel_membership(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
+
+def _build_join_keyboard(r1: bool, r2: bool) -> InlineKeyboardMarkup:
+    """Build a join keyboard showing ONLY the channels the user hasn't joined yet."""
+    buttons = []
+    if not r1:
+        buttons.append([InlineKeyboardButton("📢 Join Channel 1", url=MANDATORY_CHANNEL_LINK)])
+    if not r2:
+        buttons.append([InlineKeyboardButton("📢 Join Channel 2", url=MANDATORY_CHANNEL_2_LINK)])
+    buttons.append([InlineKeyboardButton("🔄 I've Joined — Verify", callback_data='check_membership')])
+    return InlineKeyboardMarkup(buttons)
+
+
+async def check_channel_membership(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> tuple[bool, bool, bool]:
     """Check if user is a member of BOTH mandatory channels.
-    Both checks run in parallel (asyncio.gather) — same latency as checking one.
-    Result cached for 5 minutes.
+    Returns (all_joined, joined_ch1, joined_ch2).
+    Both checks run in parallel. Result cached for 60 seconds.
     """
     now = _time.monotonic()
 
     # Return cached result if still fresh
     cached = _membership_cache.get(user_id)
     if cached is not None:
-        is_member, expires_at = cached
+        r1, r2, expires_at = cached
         if now < expires_at:
-            return is_member
+            return r1 and r2, r1, r2
 
-    # Evict stale entries if cache is too large
+    # Evict stale entries if cache grows too large
     if len(_membership_cache) > 50000:
         cutoff = now - MEMBERSHIP_CACHE_TTL
-        stale = [k for k, (_, exp) in _membership_cache.items() if exp < cutoff]
+        stale = [k for k, (_, __, exp) in _membership_cache.items() if exp < cutoff]
         for k in stale:
             del _membership_cache[k]
 
     async def _check_one(channel_id: int) -> bool:
-        """Check membership for one channel. Returns True on API errors (fail-open)."""
+        """Returns False ONLY when Telegram explicitly confirms user is not a member.
+        All ambiguous errors (bot not admin, network, etc.) fail open → True.
+        """
         try:
             member = await context.bot.get_chat_member(chat_id=channel_id, user_id=user_id)
-            return member.status in ('member', 'administrator', 'creator')
+            return member.status not in ('left', 'kicked', 'banned')
         except Exception as e:
             err = str(e).lower()
-            if any(kw in err for kw in ('bot is not a member', 'chat not found',
-                                        'bot was kicked', 'forbidden', 'have no rights')):
-                return True   # Bot not admin — fail open so users aren't stuck
-            return False
+            if 'kicked' in err or 'banned' in err:
+                return False
+            return True   # fail open for all other errors
 
-    # Check BOTH channels in parallel — same network cost as checking one
     r1, r2 = await asyncio.gather(
         _check_one(MANDATORY_CHANNEL),
         _check_one(MANDATORY_CHANNEL_2),
     )
-    is_member = r1 and r2
-    _membership_cache[user_id] = (is_member, now + MEMBERSHIP_CACHE_TTL)
-    return is_member
+    _membership_cache[user_id] = (r1, r2, now + MEMBERSHIP_CACHE_TTL)
+    return r1 and r2, r1, r2
 
 
 def get_main_menu_keyboard():
@@ -688,28 +699,19 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         user_id = update.effective_user.id
     
     try:
-        # FIRST: Check if user is still a member of the mandatory channel
-        is_member = await check_channel_membership(context, user_id)
-        
-        if not is_member:
-            # User hasn't joined one or both channels — show both join buttons
-            keyboard = [
-                [InlineKeyboardButton("📢 Join Channel 1", url=MANDATORY_CHANNEL_LINK)],
-                [InlineKeyboardButton("📢 Join Channel 2", url=MANDATORY_CHANNEL_2_LINK)],
-                [InlineKeyboardButton("🔄 I've Joined Both — Verify", callback_data='check_membership')]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
+        # FIRST: Check if user is still a member of the mandatory channels
+        all_joined, r1, r2 = await check_channel_membership(context, user_id)
+
+        if not all_joined:
+            missing = ([] if r1 else ['Channel 1']) + ([] if r2 else ['Channel 2'])
+            missing_str = ' and '.join(missing)
             await context.bot.send_message(
                 chat_id=chat_id,
-                text="🔒 **Channel Membership Required!**\n\n"
-                     "You must join **both** channels to use this bot.\n\n"
-                     "📢 **Steps:**\n"
-                     "1️⃣ Click **Join Channel 1** and join\n"
-                     "2️⃣ Click **Join Channel 2** and join\n"
-                     "3️⃣ Click **Verify** to confirm\n\n"
-                     "After joining both, you can watch videos! 🎬",
+                text=f"🔒 **You need to join {missing_str}!**\n\n"
+                     f"Please join the required channel(s) below, then click Verify.\n\n"
+                     f"After joining, you can watch videos! 🎬",
                 parse_mode='Markdown',
-                reply_markup=reply_markup
+                reply_markup=_build_join_keyboard(r1, r2)
             )
             return
         
@@ -926,26 +928,18 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Save user to file (persistent storage)
     add_user_to_file(user_id, first_name, username)
     
-    # Check if user is a member of the mandatory channel
-    is_member = await check_channel_membership(context, user_id)
-    
-    if not is_member:
-        keyboard = [
-            [InlineKeyboardButton("📢 Join Channel 1", url=MANDATORY_CHANNEL_LINK)],
-            [InlineKeyboardButton("📢 Join Channel 2", url=MANDATORY_CHANNEL_2_LINK)],
-            [InlineKeyboardButton("🔄 I've Joined Both — Verify", callback_data='check_membership')]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+    # Check if user is a member of the mandatory channels
+    all_joined, r1, r2 = await check_channel_membership(context, user_id)
+
+    if not all_joined:
+        missing = ([] if r1 else ['Channel 1']) + ([] if r2 else ['Channel 2'])
+        missing_str = ' and '.join(missing)
         await update.message.reply_text(
             f"👋 Welcome {first_name}!\n\n"
-            f"🔒 To use this bot, you must join **both** channels first.\n\n"
-            f"📢 **Steps:**\n"
-            f"1️⃣ Click **Join Channel 1** and join\n"
-            f"2️⃣ Click **Join Channel 2** and join\n"
-            f"3️⃣ Click **Verify** to confirm\n\n"
-            f"After joining both, you'll get full access! 🎬",
+            f"🔒 To use this bot, please join **{missing_str}** first.\n\n"
+            f"Click the button(s) below, then tap Verify. 🎬",
             parse_mode='Markdown',
-            reply_markup=reply_markup
+            reply_markup=_build_join_keyboard(r1, r2)
         )
         return
     
@@ -1188,51 +1182,42 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass  # Silently ignore expired/old queries
     
     if query.data == 'check_membership':
-        # User clicked refresh button - check if they joined the channel
         user_id = query.from_user.id
         first_name = query.from_user.first_name or "there"
-        
-        is_member = await check_channel_membership(context, user_id)
-        
-        if is_member:
-            # User has joined both! Show welcome message
+
+        # Invalidate cache so this verify always does a fresh API check
+        _membership_cache.pop(user_id, None)
+        all_joined, r1, r2 = await check_channel_membership(context, user_id)
+
+        if all_joined:
+            # User has joined both — show welcome
             keyboard = [[InlineKeyboardButton("🎬 Get First Video", callback_data='next_video')]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
             try:
                 await query.message.edit_text(
                     f"✅ **Verified!**\n\n"
                     f"Welcome {first_name}! 👋\n\n"
                     f"You've successfully joined both channels!\n\n"
                     f"🎥 You can watch **3 free videos** per day!\n"
-                    f"\U0001f4e5 You can download **2 videos** per day!\n"
+                    f"📥 You can download **2 videos** per day!\n"
                     f"⏰ Limits reset every **24 hours at midnight IST**!\n\n"
                     f"💎 Want unlimited access? Watch an ad for **12 hours of premium**!\n\n"
                     f"Click below to start watching! 🍿",
                     parse_mode='Markdown',
-                    reply_markup=reply_markup
+                    reply_markup=InlineKeyboardMarkup(keyboard)
                 )
             except Exception as e:
                 if "Message is not modified" not in str(e):
                     print(f"⚠️ Error editing message: {e}")
         else:
-            # User still hasn't joined both channels
-            keyboard = [
-                [InlineKeyboardButton("📢 Join Channel 1", url=MANDATORY_CHANNEL_LINK)],
-                [InlineKeyboardButton("📢 Join Channel 2", url=MANDATORY_CHANNEL_2_LINK)],
-                [InlineKeyboardButton("🔄 Verify Again", callback_data='check_membership')]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
+            # Show only the channel(s) the user hasn't joined yet
+            missing = ([] if r1 else ['Channel 1']) + ([] if r2 else ['Channel 2'])
+            missing_str = ' and '.join(missing)
             try:
                 await query.message.edit_text(
-                    f"❌ **Not Joined Yet**\n\n"
-                    f"You haven't joined both channels yet.\n\n"
-                    f"📢 **Please:**\n"
-                    f"1️⃣ Join Channel 1\n"
-                    f"2️⃣ Join Channel 2\n"
-                    f"3️⃣ Click 'Verify Again'\n\n"
-                    f"You must join both to use this bot! 🔒",
+                    f"❌ **Still need to join {missing_str}**\n\n"
+                    f"Please join the channel(s) shown below, then tap Verify again. 🔒",
                     parse_mode='Markdown',
-                    reply_markup=reply_markup
+                    reply_markup=_build_join_keyboard(r1, r2)
                 )
             except Exception as e:
                 if "Message is not modified" not in str(e):
