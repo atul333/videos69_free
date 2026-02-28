@@ -370,7 +370,9 @@ async def check_channel_membership(context: ContextTypes.DEFAULT_TYPE, user_id: 
         """
         try:
             member = await context.bot.get_chat_member(chat_id=channel_id, user_id=user_id)
-            return member.status not in ('left', 'kicked', 'banned', 'restricted')
+            result = member.status not in ('left', 'kicked', 'banned')
+            print(f"🔍 Membership check: user={user_id} channel={channel_id} status='{member.status}' → {'✅ member' if result else '❌ not member'}")
+            return result
         except Exception as e:
             err = str(e).lower()
             # Log a clear warning if the bot is not admin (most common misconfiguration)
