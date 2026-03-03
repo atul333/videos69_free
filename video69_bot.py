@@ -746,17 +746,22 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                         time_msg = f"{hours_until_reset} hour(s) and {minutes_until_reset % 60} minute(s)"
                     else:
                         time_msg = f"{minutes_until_reset} minute(s)"
-                    keyboard = [[InlineKeyboardButton("📺 Watch Ad", callback_data='watch_ad')]]
+                    keyboard = [[InlineKeyboardButton("�▶️ Watch Ad → Get FREE Premium! 🎁", callback_data='watch_ad')]]
                     reply_markup = InlineKeyboardMarkup(keyboard)
                     await context.bot.send_message(
                         chat_id=chat_id,
                         text=f"⏰ **Premium Access Expired!**\n\n"
-                             f"Your premium access has ended.\n\n"
-                             f"**Options**:\n"
-                             f"• 📺 Watch an ad to get **12 more hours of premium**\n"
-                             f"• ⏰ Wait **{time_msg}** for your limit to reset at **midnight (12:00 AM) IST**\n\n"
-                             f"⏱️ Limits reset every **24 hours at midnight**\n\n"
-                             f"Choose an option below:",
+                             f"Your 12-hour premium has ended. To keep watching unlimited videos, you need to watch **1 short ad**.\n\n"
+                             f"━━━━━━━━━━━━━━━━━━━━\n"
+                             f"🎯 **HOW TO UNLOCK PREMIUM:**\n"
+                             f"━━━━━━━━━━━━━━━━━━━━\n"
+                             f"� **Step 1:** Tap the **�📺 Watch Ad** button below\n"
+                             f"✅ **Step 2:** Premium instantly unlocks!\n\n"
+                             f"🎁 **What you get after watching the ad:**\n"
+                             f"• 🔓 Unlimited videos for **12 hours**\n"
+                             f"• 📥 **20 downloads** (instead of 2)\n\n"
+                             f"⏳ Or wait **{time_msg}** to get **3 free videos** again at midnight.\n\n"
+                             f"⬇️ Tap below to watch the ad and unlock now:",
                         parse_mode='Markdown',
                         reply_markup=reply_markup
                     )
@@ -774,17 +779,22 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 time_msg = f"{hours_until_reset} hour(s) and {minutes_until_reset % 60} minute(s)"
             else:
                 time_msg = f"{minutes_until_reset} minute(s)"
-            keyboard = [[InlineKeyboardButton("📺 Watch Ad", callback_data='watch_ad')]]
+            keyboard = [[InlineKeyboardButton("�▶️ Watch Ad → Get FREE Premium! 🎁", callback_data='watch_ad')]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"❌ **Daily Limit Reached!**\n\n"
-                     f"You've watched all **3 free videos** for today.\n\n"
-                     f"**Options**:\n"
-                     f"• 📺 Watch an ad to get **12 hours of unlimited access**\n"
-                     f"• ⏰ Wait **{time_msg}** for your limit to reset at **midnight (12:00 AM) IST**\n\n"
-                     f"⏱️ Limits reset every **24 hours at midnight**\n\n"
-                     f"Choose an option below:",
+                text=f"🚫 **You've Watched All 3 Free Videos!**\n\n"
+                     f"To continue watching, you must **watch 1 short ad** to unlock Premium Access.\n\n"
+                     f"━━━━━━━━━━━━━━━━━━━━\n"
+                     f"🎯 **HOW TO UNLOCK PREMIUM:**\n"
+                     f"━━━━━━━━━━━━━━━━━━━━\n"
+                     f"👇 **Step 1:** Tap the **📺 Watch Ad** button below\n"
+                     f"✅ **Step 2:** Premium instantly unlocks!\n\n"
+                     f"🎁 **What you get after watching the ad:**\n"
+                     f"• 🔓 Unlimited videos for **12 hours**\n"
+                     f"• 📥 **20 downloads** (instead of 2)\n\n"
+                     f"⏳ Or wait **{time_msg}** to get **3 free videos** again at midnight.\n\n"
+                     f"⬇️ Tap below to watch the ad and unlock now:",
                 parse_mode='Markdown',
                 reply_markup=reply_markup
             )
@@ -832,7 +842,7 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 else:
                     # Download limit reached - add Watch Ad button for free users
                     if not is_premium:
-                        keyboard.append([InlineKeyboardButton("💎 Watch Ad for Premium", callback_data='watch_ad')])
+                        keyboard.append([InlineKeyboardButton("�▶️ Watch Ad → Get FREE Premium! 🎁", callback_data='watch_ad')])
                 
                 # Always add Next button
                 keyboard.append([InlineKeyboardButton("▶️ Next", callback_data='next_video')])
