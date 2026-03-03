@@ -746,7 +746,12 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                         time_msg = f"{hours_until_reset} hour(s) and {minutes_until_reset % 60} minute(s)"
                     else:
                         time_msg = f"{minutes_until_reset} minute(s)"
-                    keyboard = [[InlineKeyboardButton("🔥▶️ Watch Ad → Get FREE Premium! 🎁", callback_data='watch_ad')]]
+                    # Generate shortened link upfront — 1-click direct ad access
+                    shortened_link = await create_shortened_link(user_id)
+                    if shortened_link:
+                        keyboard = [[InlineKeyboardButton("🔥▶️ Watch Ad → Get FREE Premium! 🎁", url=shortened_link)]]
+                    else:
+                        keyboard = [[InlineKeyboardButton("🔥▶️ Watch Ad → Get FREE Premium! 🎁", callback_data='watch_ad')]]
                     reply_markup = InlineKeyboardMarkup(keyboard)
                     await context.bot.send_message(
                         chat_id=chat_id,
@@ -755,13 +760,13 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                              f"━━━━━━━━━━━━━━━━━━━━\n"
                              f"🎯 **HOW TO UNLOCK PREMIUM:**\n"
                              f"━━━━━━━━━━━━━━━━━━━━\n"
-                             f"👇 **Step 1:** Tap the **📺 Watch Ad** button below\n"
-                             f"✅ **Step 2:** Premium instantly unlocks!\n\n"
-                             f"🎁 **What you get after watching the ad:**\n"
+                             f"🔥 **Tap the button below** to watch the ad\n"
+                             f"✅ **Premium unlocks instantly** after watching!\n\n"
+                             f"🎁 **What you get:**\n"
                              f"• 🔓 Unlimited videos for **12 hours**\n"
                              f"• 📥 **20 downloads** (instead of 2)\n\n"
                              f"⏳ Or wait **{time_msg}** to get **3 free videos** again at midnight.\n\n"
-                             f"⬇️ Tap below to watch the ad and unlock now:",
+                             f"⬇️ One tap → Instant premium access:",
                         parse_mode='Markdown',
                         reply_markup=reply_markup
                     )
@@ -779,7 +784,12 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 time_msg = f"{hours_until_reset} hour(s) and {minutes_until_reset % 60} minute(s)"
             else:
                 time_msg = f"{minutes_until_reset} minute(s)"
-            keyboard = [[InlineKeyboardButton("🔥▶️ Watch Ad → Get FREE Premium! 🎁", callback_data='watch_ad')]]
+            # Generate shortened link upfront — 1-click direct ad access
+            shortened_link = await create_shortened_link(user_id)
+            if shortened_link:
+                keyboard = [[InlineKeyboardButton("🔥▶️ Watch Ad → Get FREE Premium! 🎁", url=shortened_link)]]
+            else:
+                keyboard = [[InlineKeyboardButton("🔥▶️ Watch Ad → Get FREE Premium! 🎁", callback_data='watch_ad')]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await context.bot.send_message(
                 chat_id=chat_id,
@@ -788,13 +798,13 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                      f"━━━━━━━━━━━━━━━━━━━━\n"
                      f"🎯 **HOW TO UNLOCK PREMIUM:**\n"
                      f"━━━━━━━━━━━━━━━━━━━━\n"
-                     f"👇 **Step 1:** Tap the **📺 Watch Ad** button below\n"
-                     f"✅ **Step 2:** Premium instantly unlocks!\n\n"
-                     f"🎁 **What you get after watching the ad:**\n"
+                     f"🔥 **Tap the button below** to watch the ad\n"
+                     f"✅ **Premium unlocks instantly** after watching!\n\n"
+                     f"🎁 **What you get:**\n"
                      f"• 🔓 Unlimited videos for **12 hours**\n"
                      f"• 📥 **20 downloads** (instead of 2)\n\n"
                      f"⏳ Or wait **{time_msg}** to get **3 free videos** again at midnight.\n\n"
-                     f"⬇️ Tap below to watch the ad and unlock now:",
+                     f"⬇️ One tap → Instant premium access:",
                 parse_mode='Markdown',
                 reply_markup=reply_markup
             )
