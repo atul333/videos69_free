@@ -746,7 +746,7 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                         time_msg = f"{hours_until_reset} hour(s) and {minutes_until_reset % 60} minute(s)"
                     else:
                         time_msg = f"{minutes_until_reset} minute(s)"
-                    keyboard = [[InlineKeyboardButton("�▶️ Watch Ad → Get FREE Premium! 🎁", callback_data='watch_ad')]]
+                    keyboard = [[InlineKeyboardButton("🔥▶️ Watch Ad → Get FREE Premium! 🎁", callback_data='watch_ad')]]
                     reply_markup = InlineKeyboardMarkup(keyboard)
                     await context.bot.send_message(
                         chat_id=chat_id,
@@ -755,7 +755,7 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                              f"━━━━━━━━━━━━━━━━━━━━\n"
                              f"🎯 **HOW TO UNLOCK PREMIUM:**\n"
                              f"━━━━━━━━━━━━━━━━━━━━\n"
-                             f"� **Step 1:** Tap the **�📺 Watch Ad** button below\n"
+                             f"👇 **Step 1:** Tap the **📺 Watch Ad** button below\n"
                              f"✅ **Step 2:** Premium instantly unlocks!\n\n"
                              f"🎁 **What you get after watching the ad:**\n"
                              f"• 🔓 Unlimited videos for **12 hours**\n"
@@ -779,7 +779,7 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 time_msg = f"{hours_until_reset} hour(s) and {minutes_until_reset % 60} minute(s)"
             else:
                 time_msg = f"{minutes_until_reset} minute(s)"
-            keyboard = [[InlineKeyboardButton("�▶️ Watch Ad → Get FREE Premium! 🎁", callback_data='watch_ad')]]
+            keyboard = [[InlineKeyboardButton("🔥▶️ Watch Ad → Get FREE Premium! 🎁", callback_data='watch_ad')]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await context.bot.send_message(
                 chat_id=chat_id,
