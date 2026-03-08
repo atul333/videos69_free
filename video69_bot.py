@@ -896,12 +896,13 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                     protect_content=True,
                 )
 
-                # ── BUG FIX: batch both state mutations into a single save_user_states call ──
-                # Previously mark_video_as_seen() and increment_video_count() each called
-                # save_user_states() separately = 2 SQLite writes per video. Now only 1.
+                # Batch both mutations into one save_user_states call (single SQLite flush).
                 user_states[user_id]['seen_videos'].add(message_id)
-                if not is_premium:
-                    user_states[user_id]['hourly_count'] += 1
+                # Always increment hourly_count for ALL users (premium + free).
+                # The daily-limit check is: is_premium OR count < LIMIT
+                # Since is_premium short-circuits first, premium users are never blocked
+                # by this counter — but it lets /stats correctly count their videos.
+                user_states[user_id]['hourly_count'] += 1
                 save_user_states(user_states, _hint_uid=user_id)  # single flush
 
                 # Schedule deletion — only one message now (video+caption are the same msg)
@@ -1836,15 +1837,20 @@ def main():
         application.add_handler(CommandHandler("stats", admin_stats_command))
         application.add_handler(CommandHandler("deletebroadcast", admin_delete_broadcast_command))
 
-        # Broadcast: 2-step ConversationHandler
-        # Step 1: /broadcast → admin_broadcast_command  (asks for message)
-        # Step 2: any message → handle_broadcast_message (sends to all users)
+        # Broadcast ConversationHandler in group=-1 (highest priority).
+        # MUST be group=-1, not group=0. Reason:
+        # When admin is in _BROADCAST_WAITING state and sends a command like /stats,
+        # the ConversationHandler in group=0 would consume the update first, find no
+        # matching state handler (due to ~filters.COMMAND), then let it fall through
+        # to the SAME group=0 where CommandHandler("stats") ALSO fires — causing
+        # duplicate responses. group=-1 gives it exclusive ownership of updates
+        # it handles, and other handlers in group=0 process the rest independently.
         broadcast_conv = ConversationHandler(
             entry_points=[CommandHandler("broadcast", admin_broadcast_command)],
             states={
                 _BROADCAST_WAITING: [
                     MessageHandler(
-                        filters.ALL & ~filters.COMMAND & filters.User(ADMIN_USER_ID),
+                        filters.ALL & ~filters.COMMAND & filters.User(user_id=ADMIN_USER_ID),
                         handle_broadcast_message
                     )
                 ]
@@ -1852,7 +1858,7 @@ def main():
             fallbacks=[CommandHandler("cancel", admin_broadcast_cancel)],
             per_user=True,
         )
-        application.add_handler(broadcast_conv)
+        application.add_handler(broadcast_conv, group=-1)
 
         # Add callback query handler for buttons (handles both user and admin callbacks)
         application.add_handler(CallbackQueryHandler(
