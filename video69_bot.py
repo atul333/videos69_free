@@ -70,6 +70,14 @@ _MAX_BROADCAST_HISTORY = 20          # keep last 20 broadcasts in memory
 # ConversationHandler state for /broadcast flow
 _BROADCAST_WAITING = 1
 
+# ── /stats cooldown ──
+# Prevents the bot from sending duplicate stats messages when /stats is
+# pressed many times in rapid succession. First call goes through; any
+# subsequent call within _STATS_COOLDOWN seconds is silently dropped.
+_stats_lock    = asyncio.Lock()
+_stats_last_ts: float = 0.0
+_STATS_COOLDOWN = 5.0  # seconds
+
 
 # Load user states from persistent storage (replaces in-memory dictionary)
 # Structure: {user_id: {'seen_videos': [], 'hourly_count': 0, 'last_reset': datetime, 'premium_until': datetime}}
@@ -1601,10 +1609,21 @@ def _get_today_stats() -> dict:
 
 
 async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin-only: /stats  — show today’s live stats instantly."""
+    """Admin-only: /stats — show today’s live stats.
+    Cooldown-protected: only 1 response per 5-second window, so pressing
+    /stats many times rapidly results in exactly 1 message, not many.
+    """
     if not _is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ You are not authorized to use this command.")
         return
+
+    # ── Cooldown: drop all duplicate calls within 5 seconds ──
+    global _stats_last_ts
+    async with _stats_lock:
+        now_ts = _time.monotonic()
+        if now_ts - _stats_last_ts < _STATS_COOLDOWN:
+            return  # silently drop — a response was already sent moments ago
+        _stats_last_ts = now_ts  # claim this 5-second window
 
     s = _get_today_stats()
     now_ist = (_now_utc() + _IST_OFFSET).strftime('%d %b %Y  %I:%M %p')
@@ -1614,7 +1633,7 @@ async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"⏰ As of: `{now_ist} IST`\n"
         f"━" * 28 + "\n\n"
         f"👥 *Total registered users:* `{s['total_users']}`\n\n"
-        f"📅 *Today \u2019s Activity*\n"
+        f"📅 *Today\u2019s Activity*\n"
         f"  ▶️  Active users (watched video): `{s['active_today']}`\n"
         f"  🎬 Videos watched today: `{s['total_videos_today']}`\n\n"
         f"💎 *Premium*\n"
@@ -1622,6 +1641,32 @@ async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"  ✅ Currently active premium: `{s['premium_active_now']}`\n"
     )
     await update.message.reply_text(text, parse_mode='Markdown')
+
+async def send_daily_admin_report(context: ContextTypes.DEFAULT_TYPE):
+    """Scheduled job: sends the day's stats to admin at 11:58 PM IST every day."""
+    s       = _get_today_stats()
+    now_ist = (_now_utc() + _IST_OFFSET).strftime('%d %b %Y')
+
+    text = (
+        f"📊 *Daily Report — {now_ist}*\n"
+        f"━" * 28 + "\n\n"
+        f"👥 *Total registered users:* `{s['total_users']}`\n\n"
+        f"📅 *Today\u2019s Activity*\n"
+        f"  ▶️  Active users (watched video): `{s['active_today']}`\n"
+        f"  🎬 Videos watched today: `{s['total_videos_today']}`\n\n"
+        f"💎 *Premium*\n"
+        f"  ⭐ Activated premium today: `{s['premium_today']}`\n"
+        f"  ✅ Currently active premium: `{s['premium_active_now']}`\n\n"
+        f"🔔 _Auto-report sent at 11:58 PM IST_"
+    )
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_USER_ID,
+            text=text,
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        print(f"⚠️ Daily admin report failed: {e}")
 
 
 async def admin_broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1939,14 +1984,32 @@ def main():
         
         # Schedule for every 24 hours
         job_queue = application.job_queue
-        
+
         # Run every 24 hours at midnight (00:00 IST)
         job_queue.run_repeating(
             broadcast_daily_reset,
-            interval=86400,  # Every 24 hours in seconds (24 * 3600)
-            first=seconds_until_next_broadcast,  # Wait until next midnight
+            interval=86400,
+            first=seconds_until_next_broadcast,
             name='daily_broadcast'
         )
+
+        # ── Daily admin stats report at 11:58 PM IST ──
+        # Calculate seconds until first 23:58 IST
+        next_report_ist = now_ist.replace(hour=23, minute=58, second=0, microsecond=0)
+        if now_ist >= next_report_ist:
+            # Already past 11:58 PM today — schedule for tomorrow
+            next_report_ist += timedelta(days=1)
+        next_report_utc = next_report_ist - _IST_OFFSET
+        seconds_until_report = (next_report_utc - now_utc).total_seconds()
+
+        job_queue.run_repeating(
+            send_daily_admin_report,
+            interval=86400,          # repeat every 24 hours
+            first=seconds_until_report,
+            name='daily_admin_report'
+        )
+        print(f"📊 Daily admin report scheduled at 11:58 PM IST")
+        print(f"   First report in: {int(seconds_until_report / 3600)}h {int((seconds_until_report % 3600) / 60)}m")
         
         print(f"📢 Daily broadcast scheduler enabled!")
         print(f"   Current time: {now_ist.strftime('%I:%M %p')} IST")
