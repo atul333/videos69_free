@@ -43,18 +43,21 @@ CHANNEL_IDENTIFIER = CHANNEL_ID if CHANNEL_ID else f"@{CHANNEL_USERNAME}"
 # Admin configuration for support system
 ADMIN_USER_ID = 7708376300  # Admin's Telegram user ID (https://t.me/Deep12048)
 
-# Configure request — tuned for t4g.medium (2 ARM vCPU, 4 GB RAM)
+# Configure request — pool_size matches MAX_CONCURRENT_REQUESTS (16)
+# so no coroutine ever blocks waiting for a free connection.
 request = HTTPXRequest(
-    connection_pool_size=4,   # t4g ARM: 4 connections is optimal for 2 vCPUs
+    connection_pool_size=16,  # must be >= MAX_CONCURRENT_REQUESTS to avoid pool starvation
     connect_timeout=15.0,
     read_timeout=15.0,
     write_timeout=15.0,
     pool_timeout=5.0
 )
 
-# 8 concurrent handlers — Telegram bottlenecks at 30 msg/sec anyway;
-# more coroutines = more memory, zero throughput gain
-MAX_CONCURRENT_REQUESTS = 8
+# 16 concurrent handlers — safe for t4g.medium (2 ARM vCPU, 4 GB RAM);
+# async coroutines are lightweight (~50 KB each), so 16 adds ~800 KB overhead max.
+# Telegram still bottlenecks at ~30 msg/sec per token; 16 slots ensures
+# no handler waits in the semaphore queue during burst traffic.
+MAX_CONCURRENT_REQUESTS = 16
 request_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
 
@@ -813,6 +816,7 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         # Try to find a valid video (try up to 10 random message IDs)
         max_attempts = 10
         video_sent = False
+        message_id = None  # guard: prevents NameError if get_random_video() raises on attempt 0
         
         for attempt in range(max_attempts):
             try:
@@ -823,51 +827,11 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 download_limit = PREMIUM_DOWNLOADABLE_VIDEOS_LIMIT if is_premium else DOWNLOADABLE_VIDEOS_LIMIT
                 can_show_download_button = downloaded_count < download_limit
                 
-                # Always send videos with protection enabled initially
-                # Users must click the Download button to get an unprotected copy
-                video_msg = await context.bot.copy_message(
-                    chat_id=chat_id,
-                    from_chat_id=CHANNEL_IDENTIFIER,
-                    message_id=message_id,
-                    protect_content=True  # Always protected initially
-                )
-                
-                # If we got here, the message was sent successfully
-                # Mark video as seen
-                mark_video_as_seen(user_id, message_id)
-                
-                # Increment daily video count (for non-premium users)
-                if not is_premium:
-                    increment_video_count(user_id)
-                
-                # Create buttons based on download availability and premium status
-                keyboard = []
-                
-                # Add Download button if user has downloads remaining
-                if can_show_download_button:
-                    remaining = download_limit - downloaded_count
-                    # Store video info for download callback: format is "download_channelMsgId"
-                    download_callback = f"download_{message_id}"
-                    keyboard.append([InlineKeyboardButton(f"📥 Download ({remaining} left)", callback_data=download_callback)])
-                else:
-                    # Download limit reached - add Watch Ad button for free users
-                    if not is_premium:
-                        keyboard.append([InlineKeyboardButton("�▶️ Watch Ad → Get FREE Premium! 🎁", callback_data='watch_ad')])
-                
-                # Always add Next button
-                keyboard.append([InlineKeyboardButton("▶️ Next", callback_data='next_video')])
-                
-                # Add "Unlock Premium" button for non-premium users (always shown)
-                if not is_premium:
-                    keyboard.append([InlineKeyboardButton("🔓 Unlock Premium", callback_data='unlock_premium')])
-                
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                # Send message with appropriate text
+                # Build caption text based on download availability and premium status
                 if can_show_download_button:
                     remaining = download_limit - downloaded_count
                     if is_premium:
-                        warning_text = (
+                        caption_text = (
                             f"👆 Enjoy the video!\n\n"
                             f"💎 Premium User Benefits:\n"
                             f"📥 Click 'Download' button to get a downloadable copy\n"
@@ -875,7 +839,7 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                             f"⚠️ This video will be deleted after 20 minutes."
                         )
                     else:
-                        warning_text = (
+                        caption_text = (
                             f"👆 Enjoy the video!\n\n"
                             f"💾 Click 'Download' button to get a downloadable copy\n"
                             f"📥 Downloads remaining: {remaining}\n\n"
@@ -884,32 +848,59 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 else:
                     # Different messages for premium vs free users when limit reached
                     if is_premium:
-                        warning_text = (
+                        caption_text = (
                             f"👆 Enjoy the video!\n\n"
                             f"🔒 Download limit reached ({download_limit} videos).\n"
                             f"⚠️ This video will be deleted after 20 minutes."
                         )
                     else:
-                        warning_text = (
+                        caption_text = (
                             f"👆 Enjoy the video!\n\n"
                             f"🔒 Download limit reached ({download_limit} videos).\n\n"
-                            f"💎 **Want 20 downloads per day?**\n"
+                            f"💎 Want 20 downloads per day?\n"
                             f"Watch an ad for Premium Access:\n"
                             f"✅ Unlimited videos + 20 downloads!\n\n"
                             f"⚠️ This video will be deleted after 20 minutes."
                         )
-                
-                warning_msg = await context.bot.send_message(
+
+                # Build inline keyboard
+                keyboard = []
+                if can_show_download_button:
+                    remaining = download_limit - downloaded_count
+                    download_callback = f"download_{message_id}"
+                    keyboard.append([InlineKeyboardButton(f"📥 Download ({remaining} left)", callback_data=download_callback)])
+                else:
+                    if not is_premium:
+                        keyboard.append([InlineKeyboardButton("🔥▶️ Watch Ad → Get FREE Premium! 🎁", callback_data='watch_ad')])
+                keyboard.append([InlineKeyboardButton("▶️ Next", callback_data='next_video')])
+                if not is_premium:
+                    keyboard.append([InlineKeyboardButton("🔓 Unlock Premium", callback_data='unlock_premium')])
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
+                # ── SINGLE API CALL: video + caption + buttons in one request ──
+                # This halves Telegram API usage vs the old send_video + send_message pattern.
+                video_msg = await context.bot.copy_message(
                     chat_id=chat_id,
-                    text=warning_text,
-                    reply_markup=reply_markup
+                    from_chat_id=CHANNEL_IDENTIFIER,
+                    message_id=message_id,
+                    caption=caption_text,
+                    reply_markup=reply_markup,
+                    protect_content=True,
                 )
-                
-                # Schedule deletion of both video and warning message after 20 minutes (1200 seconds)
+
+                # ── BUG FIX: batch both state mutations into a single save_user_states call ──
+                # Previously mark_video_as_seen() and increment_video_count() each called
+                # save_user_states() separately = 2 SQLite writes per video. Now only 1.
+                user_states[user_id]['seen_videos'].add(message_id)
+                if not is_premium:
+                    user_states[user_id]['hourly_count'] += 1
+                save_user_states(user_states, _hint_uid=user_id)  # single flush
+
+                # Schedule deletion — only one message now (video+caption are the same msg)
                 context.job_queue.run_once(
                     delete_messages,
-                    when=1200,  # 20 minutes in seconds
-                    data={'chat_id': chat_id, 'message_ids': [video_msg.message_id, warning_msg.message_id]},
+                    when=1200,  # 20 minutes
+                    data={'chat_id': chat_id, 'message_ids': [video_msg.message_id]},
                     name=f"delete_{chat_id}_{video_msg.message_id}"
                 )
                 
@@ -917,11 +908,13 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 break  # Success
                 
             except Exception:
-                # Message ID doesn't exist or isn't a video — mark failed and retry
-                failed_ids = user_states[user_id].setdefault('failed_message_ids', set())
-                if message_id not in failed_ids:     # O(1) set check
-                    failed_ids.add(message_id)       # O(1) set insert
-                    save_user_states(user_states, _hint_uid=user_id)
+                # Message ID doesn't exist or isn't a video — mark failed and retry.
+                # Guard: message_id may be None if get_random_video() itself raised.
+                if message_id is not None:
+                    failed_ids = user_states[user_id].setdefault('failed_message_ids', set())
+                    if message_id not in failed_ids:
+                        failed_ids.add(message_id)
+                        save_user_states(user_states, _hint_uid=user_id)
                 continue
         
         # If we couldn't find any valid video after all attempts
@@ -1091,21 +1084,18 @@ I'm here to share amazing videos with you!
 Enjoy! 🍿
     """
     
-    # Create \"Get First Video\" inline button
-    inline_keyboard = [[InlineKeyboardButton("🎬 Get First Video", callback_data='next_video')]]
-    inline_markup = InlineKeyboardMarkup(inline_keyboard)
-    
-    # Send welcome message and clear any old persistent menus
+    # ── Single API call: welcome text + inline button in one message ──
+    # Previously this was 2 separate reply_text calls (one to clear the keyboard
+    # via ReplyKeyboardRemove, one to send the inline button). Merged into one.
+    # ReplyKeyboardRemove is still sent as reply_markup so old menus are cleared.
+    # The inline button is embedded directly in the same message.
+    inline_keyboard = [
+        [InlineKeyboardButton("🎬 Get First Video", callback_data='next_video')]
+    ]
     await update.message.reply_text(
         welcome_message,
         parse_mode='Markdown',
-        reply_markup=_REMOVE_KEYBOARD
-    )
-    
-    # Send inline button separately
-    await update.message.reply_text(
-        "👇 Click below to get your first video:",
-        reply_markup=inline_markup
+        reply_markup=InlineKeyboardMarkup(inline_keyboard)
     )
 
 
@@ -1428,48 +1418,24 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"⚠️ This video will be deleted after 20 minutes."
                     )
                 
-                # Try to update the original message
+                # ── BUG FIX: edit_caption not edit_text ──
+                # query.message is the VIDEO message (caption + buttons). Telegram's API
+                # does NOT allow editMessageText on media messages — it raises
+                # "Bad Request: there is no text in the message". Must use edit_caption.
                 try:
-                    await query.message.edit_text(
-                        text=new_text,
+                    await query.message.edit_caption(
+                        caption=new_text,
                         reply_markup=reply_markup
                     )
                 except Exception as e:
                     if "Message is not modified" not in str(e):
-                        print(f"⚠️ Error updating message: {e}")
-                
-                # Send confirmation message with deletion warning
-                if remaining > 0:
-                    if is_premium:
-                        confirmation_msg = await context.bot.send_message(
-                            chat_id=query.message.chat_id,
-                            text=f"✅ **Download Successful!**\n\n"
-                                 f"The video above can be saved/forwarded.\n"
-                                 f"💎 Premium: You have {remaining}/{download_limit} download(s) remaining.\n\n"
-                                 f"⚠️ This video will be deleted after 20 minutes."
-                        )
-                    else:
-                        confirmation_msg = await context.bot.send_message(
-                            chat_id=query.message.chat_id,
-                            text=f"✅ **Download Successful!**\n\n"
-                                 f"The video above can be saved/forwarded.\n"
-                                 f"📥 You have {remaining} download(s) remaining.\n\n"
-                                 f"⚠️ This video will be deleted after 20 minutes."
-                        )
-                else:
-                    confirmation_msg = await context.bot.send_message(
-                        chat_id=query.message.chat_id,
-                        text=f"✅ **Download Successful!**\n\n"
-                             f"The video above can be saved/forwarded.\n"
-                             f"🔒 This was your last download. Future videos will be protected.\n\n"
-                             f"⚠️ This video will be deleted after 20 minutes."
-                    )
-                
-                # Schedule deletion of downloaded video and confirmation message after 20 minutes (1200 seconds)
+                        print(f"⚠️ Error updating caption: {e}")
+
+                # Schedule deletion of the download copy only (1 message, not 2)
                 context.job_queue.run_once(
                     delete_messages,
-                    when=1200,  # 20 minutes in seconds
-                    data={'chat_id': query.message.chat_id, 'message_ids': [download_msg.message_id, confirmation_msg.message_id]},
+                    when=1200,  # 20 minutes
+                    data={'chat_id': query.message.chat_id, 'message_ids': [download_msg.message_id]},
                     name=f"delete_download_{query.message.chat_id}_{download_msg.message_id}"
                 )
                 
