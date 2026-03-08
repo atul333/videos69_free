@@ -62,9 +62,11 @@ MAX_CONCURRENT_REQUESTS = 16
 request_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
 # ── Admin broadcast state ─────────────────────────────────────────────────────
-# Stores message IDs of the last broadcast so the admin can delete it.
-# Format: {user_id: message_id}  (cleared when a new broadcast starts)
-_last_broadcast_ids: dict[int, int] = {}
+# Stores per-broadcast message IDs so EACH broadcast can be deleted independently.
+# Format: {broadcast_id: {'ids': {user_id: message_id}, 'label': str, 'sent': int}}
+# Capped at _MAX_BROADCAST_HISTORY entries; oldest removed when cap is hit.
+_broadcast_history: dict[str, dict] = {}
+_MAX_BROADCAST_HISTORY = 20          # keep last 20 broadcasts in memory
 # ConversationHandler state for /broadcast flow
 _BROADCAST_WAITING = 1
 
@@ -1649,21 +1651,31 @@ async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT
     if not _is_admin(update.effective_user.id):
         return ConversationHandler.END
 
-    message   = update.message
-    user_ids  = get_all_user_ids()
-    total     = len(user_ids)
+    message  = update.message
+    user_ids = get_all_user_ids()
+    total    = len(user_ids)
 
     if not total:
         await message.reply_text("⚠️ No users in database to broadcast to.")
         return ConversationHandler.END
 
+    # Generate a unique broadcast ID and a human-readable label
+    ts         = int(_now_utc().timestamp())
+    rnd        = random.randint(1000, 9999)
+    bc_id      = f"bc_{ts}_{rnd}"
+    bc_label   = (_now_utc() + _IST_OFFSET).strftime('%d %b %I:%M %p')
+
     status_msg = await message.reply_text(
-        f"⏳ Broadcasting to *{total}* users… Please wait.",
+        f"⏳ Broadcasting *#{bc_label}* to *{total}* users… Please wait.",
         parse_mode='Markdown'
     )
 
-    global _last_broadcast_ids
-    _last_broadcast_ids = {}   # clear previous broadcast record
+    # Evict oldest entry if history is full
+    if len(_broadcast_history) >= _MAX_BROADCAST_HISTORY:
+        oldest_key = next(iter(_broadcast_history))
+        del _broadcast_history[oldest_key]
+
+    _broadcast_history[bc_id] = {'ids': {}, 'label': bc_label, 'sent': 0}
 
     sent    = 0
     failed  = 0
@@ -1671,13 +1683,12 @@ async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT
 
     for uid in user_ids:
         try:
-            # copy_message preserves original formatting/media exactly
             sent_msg = await context.bot.copy_message(
                 chat_id=uid,
                 from_chat_id=message.chat_id,
                 message_id=message.message_id
             )
-            _last_broadcast_ids[uid] = sent_msg.message_id
+            _broadcast_history[bc_id]['ids'][uid] = sent_msg.message_id
             sent += 1
             await asyncio.sleep(0.05)   # 20 msg/sec — safely under Telegram limit
         except Exception as e:
@@ -1686,19 +1697,22 @@ async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT
             if "Forbidden" in err or "blocked" in err.lower() or "deactivated" in err.lower():
                 blocked.append(uid)
 
+    _broadcast_history[bc_id]['sent'] = sent
+
     if blocked:
         batch_remove_users(blocked)
 
-    # Edit the status message with final result
+    # Each broadcast gets its OWN delete button embedding the broadcast ID
     delete_btn = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🗑️ Delete Broadcast", callback_data='admin_delete_broadcast')]
+        [InlineKeyboardButton("🗑️ Delete This Broadcast", callback_data=f'admin_delete_bc_{bc_id}')]
     ])
     await status_msg.edit_text(
-        f"✅ *Broadcast Complete!*\n\n"
+        f"✅ *Broadcast \u2018{bc_label}\u2019 Complete!*\n\n"
         f"  📬 Sent: `{sent}`\n"
         f"  ❌ Failed: `{failed}`\n"
         f"  🔕 Removed blocked: `{len(blocked)}`\n\n"
-        f"Tap below to delete the broadcast from all chats.",
+        f"_Broadcast ID: `{bc_id}`_\n"
+        f"Tap below to delete *this* broadcast from all chats.",
         parse_mode='Markdown',
         reply_markup=delete_btn
     )
@@ -1706,66 +1720,101 @@ async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT
 
 
 async def admin_delete_broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin-only: /deletebroadcast or inline button — delete last broadcast from all chats."""
-    # Works from both command and inline button
+    """Admin-only: delete a specific broadcast by ID (inline button or /deletebroadcast).
+
+    Inline button (callback_data = 'admin_delete_bc_{bc_id}'):
+        Deletes the exact broadcast whose ID is embedded in the button.
+
+    /deletebroadcast command:
+        Lists all stored broadcasts with individual Delete buttons so admin
+        can pick which one to delete.
+    """
+
+    # ── INLINE BUTTON PATH ──
     if update.callback_query:
         query = update.callback_query
         await query.answer()
         if not _is_admin(query.from_user.id):
             await query.answer("⛔ Not authorized.", show_alert=True)
             return
-        chat_id = query.message.chat_id
-        send_fn = lambda txt, **kw: query.message.reply_text(txt, **kw)
-        edit_fn = lambda txt, **kw: query.message.edit_text(txt, **kw)
-    else:
-        if not _is_admin(update.effective_user.id):
-            await update.message.reply_text("⛔ You are not authorized to use this command.")
+
+        # Extract broadcast ID from callback data: 'admin_delete_bc_{bc_id}'
+        bc_id = query.data.replace('admin_delete_bc_', '', 1)
+        bc    = _broadcast_history.get(bc_id)
+
+        if not bc:
+            await query.message.edit_text(
+                "⚠️ This broadcast is no longer in memory (bot may have restarted)."
+            )
             return
-        send_fn = lambda txt, **kw: update.message.reply_text(txt, **kw)
-        edit_fn = None
 
-    if not _last_broadcast_ids:
-        await send_fn("⚠️ No active broadcast to delete. Send a broadcast first.")
-        return
+        bc_label  = bc['label']
+        ids_map   = bc['ids']
 
-    status = await send_fn(
-        f"⏳ Deleting broadcast from *{len(_last_broadcast_ids)}* chats…",
-        parse_mode='Markdown'
-    )
-
-    deleted = 0
-    failed  = 0
-
-    for uid, msg_id in list(_last_broadcast_ids.items()):
+        # Update button to show progress
         try:
-            await context.bot.delete_message(chat_id=uid, message_id=msg_id)
-            deleted += 1
-            await asyncio.sleep(0.05)
-        except Exception:
-            failed += 1
-
-    _last_broadcast_ids.clear()
-
-    result_text = (
-        f"✅ *Broadcast Deleted!*\n\n"
-        f"  🗑️ Deleted: `{deleted}`\n"
-        f"  ⚠️ Could not delete: `{failed}` (already deleted or expired)"
-    )
-    try:
-        await status.edit_text(result_text, parse_mode='Markdown')
-    except Exception:
-        await send_fn(result_text, parse_mode='Markdown')
-
-    # Update the original "Delete Broadcast" button message if called via inline
-    if update.callback_query and edit_fn:
-        try:
-            await edit_fn(
-                f"✅ *Broadcast Complete — Deleted*\n"
-                f"Removed from `{deleted}` chats.",
+            await query.message.edit_text(
+                f"⏳ Deleting broadcast \u2018*{bc_label}*\u2019 from `{len(ids_map)}` chats…",
                 parse_mode='Markdown'
             )
         except Exception:
             pass
+
+        deleted = 0
+        failed  = 0
+        for uid, msg_id in list(ids_map.items()):
+            try:
+                await context.bot.delete_message(chat_id=uid, message_id=msg_id)
+                deleted += 1
+                await asyncio.sleep(0.05)
+            except Exception:
+                failed += 1
+
+        # Remove from history
+        _broadcast_history.pop(bc_id, None)
+
+        try:
+            await query.message.edit_text(
+                f"✅ *Broadcast \u2018{bc_label}\u2019 Deleted!*\n\n"
+                f"  🗑️ Deleted from: `{deleted}` chats\n"
+                f"  ⚠️ Could not delete: `{failed}` (already gone or expired)",
+                parse_mode='Markdown'
+            )
+        except Exception:
+            pass
+        return
+
+    # ── COMMAND PATH: /deletebroadcast ──
+    if not _is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ You are not authorized to use this command.")
+        return
+
+    if not _broadcast_history:
+        await update.message.reply_text(
+            "⚠️ No broadcasts in history.\n"
+            "Send a broadcast first using /broadcast."
+        )
+        return
+
+    # Build a list showing every stored broadcast with its own Delete button
+    text = "🗑️ *Select a broadcast to delete:*\n\n"
+    keyboard = []
+    for bc_id, bc in list(_broadcast_history.items()):
+        label = bc.get('label', bc_id)
+        sent  = bc.get('sent', len(bc['ids']))
+        text += f"  • *{label}* — {sent} users\n"
+        keyboard.append([
+            InlineKeyboardButton(
+                f"🗑️ Delete \u2018{label}\u2019",
+                callback_data=f'admin_delete_bc_{bc_id}'
+            )
+        ])
+
+    await update.message.reply_text(
+        text,
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 
 # ──────────────────────────────────────────────────────────────
@@ -1861,8 +1910,9 @@ def main():
         application.add_handler(broadcast_conv, group=-1)
 
         # Add callback query handler for buttons (handles both user and admin callbacks)
+        # Admin delete-broadcast buttons: pattern matches 'admin_delete_bc_{any_id}'
         application.add_handler(CallbackQueryHandler(
-            admin_delete_broadcast_command, pattern='^admin_delete_broadcast$'
+            admin_delete_broadcast_command, pattern=r'^admin_delete_bc_'
         ))
         application.add_handler(CallbackQueryHandler(button_callback))
 
