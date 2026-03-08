@@ -9,7 +9,8 @@ from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
-    ContextTypes, MessageHandler, ChatMemberHandler, filters
+    ContextTypes, MessageHandler, ChatMemberHandler, filters,
+    ConversationHandler
 )
 from telegram.request import HTTPXRequest
 import aiohttp
@@ -59,6 +60,13 @@ request = HTTPXRequest(
 # no handler waits in the semaphore queue during burst traffic.
 MAX_CONCURRENT_REQUESTS = 16
 request_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+
+# ── Admin broadcast state ─────────────────────────────────────────────────────
+# Stores message IDs of the last broadcast so the admin can delete it.
+# Format: {user_id: message_id}  (cleared when a new broadcast starts)
+_last_broadcast_ids: dict[int, int] = {}
+# ConversationHandler state for /broadcast flow
+_BROADCAST_WAITING = 1
 
 
 # Load user states from persistent storage (replaces in-memory dictionary)
@@ -1532,6 +1540,236 @@ async def handle_chat_member_update(update: Update, context: ContextTypes.DEFAUL
         print(f"🔔 User {user_id} left {ch_name} — cache evicted, will be blocked on next request")
 
 
+# ──────────────────────────────────────────────────────────────
+# ADMIN PANEL  (@Deep12048 only)
+# ──────────────────────────────────────────────────────────────
+
+def _is_admin(user_id: int) -> bool:
+    """Return True if user_id belongs to the bot admin."""
+    return user_id == ADMIN_USER_ID
+
+
+def _get_today_stats() -> dict:
+    """Compute live stats from in-memory user_states. Zero I/O.
+
+    Returns:
+        total_users         – all registered users
+        active_today        – users who watched ≥1 video since midnight IST
+        premium_today       – users who activated premium in the last 12 hours
+        premium_active_now  – users whose premium has NOT expired yet
+        total_videos_today  – sum of all hourly_count values for today
+    """
+    now = _now_utc()
+    now_ist = now + _IST_OFFSET
+    today_midnight_ist = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_midnight_utc = today_midnight_ist - _IST_OFFSET
+
+    total_users        = len(_users_cache)
+    active_today       = 0
+    premium_today      = 0
+    premium_active_now = 0
+    total_videos_today = 0
+
+    for uid, state in user_states.items():
+        # Active today: last_reset == today AND watched ≥1 video
+        last_reset = state.get('last_reset')
+        count      = state.get('hourly_count', 0)
+        if last_reset and last_reset >= today_midnight_utc and count > 0:
+            active_today += 1
+            total_videos_today += count
+
+        # Premium status
+        premium_until = state.get('premium_until')
+        if premium_until:
+            if now < premium_until:
+                premium_active_now += 1
+            # Got premium today: activation time = premium_until - PREMIUM_DURATION_HOURS
+            activated_at = premium_until - timedelta(hours=PREMIUM_DURATION_HOURS)
+            if activated_at >= today_midnight_utc:
+                premium_today += 1
+
+    return {
+        'total_users':        total_users,
+        'active_today':       active_today,
+        'premium_today':      premium_today,
+        'premium_active_now': premium_active_now,
+        'total_videos_today': total_videos_today,
+    }
+
+
+async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only: /stats  — show today’s live stats instantly."""
+    if not _is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ You are not authorized to use this command.")
+        return
+
+    s = _get_today_stats()
+    now_ist = (_now_utc() + _IST_OFFSET).strftime('%d %b %Y  %I:%M %p')
+
+    text = (
+        f"📊 *Admin Stats — Live*\n"
+        f"⏰ As of: `{now_ist} IST`\n"
+        f"━" * 28 + "\n\n"
+        f"👥 *Total registered users:* `{s['total_users']}`\n\n"
+        f"📅 *Today \u2019s Activity*\n"
+        f"  ▶️  Active users (watched video): `{s['active_today']}`\n"
+        f"  🎬 Videos watched today: `{s['total_videos_today']}`\n\n"
+        f"💎 *Premium*\n"
+        f"  ⭐ Activated premium today: `{s['premium_today']}`\n"
+        f"  ✅ Currently active premium: `{s['premium_active_now']}`\n"
+    )
+    await update.message.reply_text(text, parse_mode='Markdown')
+
+
+async def admin_broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only: /broadcast  — step 1, ask admin to send the message."""
+    if not _is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ You are not authorized to use this command.")
+        return ConversationHandler.END
+
+    await update.message.reply_text(
+        "📣 *Broadcast Mode*\n\n"
+        "Send the message you want to broadcast to ALL users.\n"
+        "You can send *text, photo, video, or any media*.\n\n"
+        "Send /cancel to abort.",
+        parse_mode='Markdown'
+    )
+    return _BROADCAST_WAITING
+
+
+async def admin_broadcast_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel the broadcast conversation."""
+    await update.message.reply_text("❌ Broadcast cancelled.")
+    return ConversationHandler.END
+
+
+async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only: step 2 — receive the message and forward to all users."""
+    if not _is_admin(update.effective_user.id):
+        return ConversationHandler.END
+
+    message   = update.message
+    user_ids  = get_all_user_ids()
+    total     = len(user_ids)
+
+    if not total:
+        await message.reply_text("⚠️ No users in database to broadcast to.")
+        return ConversationHandler.END
+
+    status_msg = await message.reply_text(
+        f"⏳ Broadcasting to *{total}* users… Please wait.",
+        parse_mode='Markdown'
+    )
+
+    global _last_broadcast_ids
+    _last_broadcast_ids = {}   # clear previous broadcast record
+
+    sent    = 0
+    failed  = 0
+    blocked = []
+
+    for uid in user_ids:
+        try:
+            # copy_message preserves original formatting/media exactly
+            sent_msg = await context.bot.copy_message(
+                chat_id=uid,
+                from_chat_id=message.chat_id,
+                message_id=message.message_id
+            )
+            _last_broadcast_ids[uid] = sent_msg.message_id
+            sent += 1
+            await asyncio.sleep(0.05)   # 20 msg/sec — safely under Telegram limit
+        except Exception as e:
+            failed += 1
+            err = str(e)
+            if "Forbidden" in err or "blocked" in err.lower() or "deactivated" in err.lower():
+                blocked.append(uid)
+
+    if blocked:
+        batch_remove_users(blocked)
+
+    # Edit the status message with final result
+    delete_btn = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗑️ Delete Broadcast", callback_data='admin_delete_broadcast')]
+    ])
+    await status_msg.edit_text(
+        f"✅ *Broadcast Complete!*\n\n"
+        f"  📬 Sent: `{sent}`\n"
+        f"  ❌ Failed: `{failed}`\n"
+        f"  🔕 Removed blocked: `{len(blocked)}`\n\n"
+        f"Tap below to delete the broadcast from all chats.",
+        parse_mode='Markdown',
+        reply_markup=delete_btn
+    )
+    return ConversationHandler.END
+
+
+async def admin_delete_broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only: /deletebroadcast or inline button — delete last broadcast from all chats."""
+    # Works from both command and inline button
+    if update.callback_query:
+        query = update.callback_query
+        await query.answer()
+        if not _is_admin(query.from_user.id):
+            await query.answer("⛔ Not authorized.", show_alert=True)
+            return
+        chat_id = query.message.chat_id
+        send_fn = lambda txt, **kw: query.message.reply_text(txt, **kw)
+        edit_fn = lambda txt, **kw: query.message.edit_text(txt, **kw)
+    else:
+        if not _is_admin(update.effective_user.id):
+            await update.message.reply_text("⛔ You are not authorized to use this command.")
+            return
+        send_fn = lambda txt, **kw: update.message.reply_text(txt, **kw)
+        edit_fn = None
+
+    if not _last_broadcast_ids:
+        await send_fn("⚠️ No active broadcast to delete. Send a broadcast first.")
+        return
+
+    status = await send_fn(
+        f"⏳ Deleting broadcast from *{len(_last_broadcast_ids)}* chats…",
+        parse_mode='Markdown'
+    )
+
+    deleted = 0
+    failed  = 0
+
+    for uid, msg_id in list(_last_broadcast_ids.items()):
+        try:
+            await context.bot.delete_message(chat_id=uid, message_id=msg_id)
+            deleted += 1
+            await asyncio.sleep(0.05)
+        except Exception:
+            failed += 1
+
+    _last_broadcast_ids.clear()
+
+    result_text = (
+        f"✅ *Broadcast Deleted!*\n\n"
+        f"  🗑️ Deleted: `{deleted}`\n"
+        f"  ⚠️ Could not delete: `{failed}` (already deleted or expired)"
+    )
+    try:
+        await status.edit_text(result_text, parse_mode='Markdown')
+    except Exception:
+        await send_fn(result_text, parse_mode='Markdown')
+
+    # Update the original "Delete Broadcast" button message if called via inline
+    if update.callback_query and edit_fn:
+        try:
+            await edit_fn(
+                f"✅ *Broadcast Complete — Deleted*\n"
+                f"Removed from `{deleted}` chats.",
+                parse_mode='Markdown'
+            )
+        except Exception:
+            pass
+
+
+# ──────────────────────────────────────────────────────────────
+
+
 def main():
     """Start the bot"""
     print("🤖 Starting Videos Bot System...")
@@ -1594,7 +1832,32 @@ def main():
         application.add_handler(CommandHandler("start", start_command))
         application.add_handler(CommandHandler("help", help_command))
 
-        # Add callback query handler for buttons
+        # ── Admin commands (@Deep12048 only) ──
+        application.add_handler(CommandHandler("stats", admin_stats_command))
+        application.add_handler(CommandHandler("deletebroadcast", admin_delete_broadcast_command))
+
+        # Broadcast: 2-step ConversationHandler
+        # Step 1: /broadcast → admin_broadcast_command  (asks for message)
+        # Step 2: any message → handle_broadcast_message (sends to all users)
+        broadcast_conv = ConversationHandler(
+            entry_points=[CommandHandler("broadcast", admin_broadcast_command)],
+            states={
+                _BROADCAST_WAITING: [
+                    MessageHandler(
+                        filters.ALL & ~filters.COMMAND & filters.User(ADMIN_USER_ID),
+                        handle_broadcast_message
+                    )
+                ]
+            },
+            fallbacks=[CommandHandler("cancel", admin_broadcast_cancel)],
+            per_user=True,
+        )
+        application.add_handler(broadcast_conv)
+
+        # Add callback query handler for buttons (handles both user and admin callbacks)
+        application.add_handler(CallbackQueryHandler(
+            admin_delete_broadcast_command, pattern='^admin_delete_broadcast$'
+        ))
         application.add_handler(CallbackQueryHandler(button_callback))
 
         # Add message handler for persistent menu buttons
