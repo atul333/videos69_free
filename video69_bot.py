@@ -1779,19 +1779,21 @@ async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def admin_clean_videos_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin-only: /cleanvideos — immediately delete ALL pending video messages for all users.
+    """Admin-only: /cleanvideos — delete OVERDUE pending video messages for all users.
 
-    Use this after a bot restart to clean up videos whose 20-min deletion
-    timers were cancelled.  The command reads every entry in pending_deletions,
-    fires delete_message for each one, then clears the table.
+    Only deletes messages whose 20-minute window has already expired (i.e. the
+    bot was restarted and those timers were lost).  Videos that are still within
+    their active 20-minute window are left alone — their scheduled jobs handle them.
+
+    Use this after a bot restart to clean up pre-restart stuck videos.
     """
     if not _is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ You are not authorized to use this command.")
         return
 
     status_msg = await update.message.reply_text(
-        "🧹 *Cleaning stuck video messages…*\n\n"
-        "Deleting all pending videos for all users…",
+        "🧹 *Cleaning overdue video messages…*\n\n"
+        "Deleting only pre-restart videos (overdue ones)…",
         parse_mode='Markdown'
     )
 
@@ -1804,30 +1806,43 @@ async def admin_clean_videos_command(update: Update, context: ContextTypes.DEFAU
         )
         return
 
+    now_ts = _now_utc().timestamp()
     deleted = 0
     already_gone = 0
-    total = len(rows)
+    skipped_fresh = 0
 
     for (row_id, chat_id, message_id, delete_at) in rows:
+        remaining = delete_at - now_ts
+        if remaining > 0:
+            # Still within the 20-min window — user is actively watching this
+            # Don't touch it; the scheduled job will delete it normally
+            skipped_fresh += 1
+            continue
+
+        # Overdue — 20-min window has passed, delete it now
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
             deleted += 1
         except Exception:
-            already_gone += 1  # message was already gone — still count it as cleaned
+            already_gone += 1  # message already gone — still clean the DB row
+        await _remove_pending_deletion(chat_id, message_id)
         await asyncio.sleep(0.05)  # 50 ms rate-limit guard
 
-    # Wipe the entire table now that everything is handled
-    await _delete_all_pending_deletions_db()
+    skip_note = (
+        f"\n⏳ Skipped (still active): `{skipped_fresh}` — will auto-delete normally"
+        if skipped_fresh > 0 else ""
+    )
 
     await status_msg.edit_text(
         f"✅ *Video Cleanup Complete!*\n\n"
-        f"📋 Total entries found: `{total}`\n"
-        f"🗑️ Deleted successfully: `{deleted}`\n"
-        f"👻 Already deleted/gone: `{already_gone}`\n\n"
-        f"All pending deletion records cleared from DB.",
+        f"🗑️ Overdue videos deleted: `{deleted}`\n"
+        f"👻 Already deleted/gone: `{already_gone}`"
+        f"{skip_note}\n\n"
+        f"Only expired (pre-restart) videos were removed.",
         parse_mode='Markdown'
     )
-    print(f"🧹 [admin_clean_videos] {deleted} deleted, {already_gone} already gone, {total} total")
+    print(f"🧹 [admin_clean_videos] {deleted} deleted, {already_gone} already gone, "
+          f"{skipped_fresh} skipped (still fresh)")
 
 
 async def send_daily_admin_report(context: ContextTypes.DEFAULT_TYPE):
