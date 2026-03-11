@@ -145,6 +145,83 @@ _users_cache: dict[int, dict] = {}  # {user_id: {first_name, username, ...}}
 _users_dirty: set[int] = set()      # user_ids needing a DB write
 
 
+# ── Persistent pending-deletion registry ─────────────────────────────────────
+# Stores video messages that must be deleted after 20 min.
+# Survives bot restarts: on startup, overdue entries are deleted immediately
+# and still-fresh entries are rescheduled for their remaining window.
+# Table lives in user_states.db for simplicity (single DB open connection).
+
+async def _init_pending_deletions_table(db):
+    """Create pending_deletions table if it doesn't exist."""
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS pending_deletions (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id     INTEGER NOT NULL,
+            message_id  INTEGER NOT NULL,
+            delete_at   REAL    NOT NULL   -- Unix timestamp (UTC)
+        )
+    """)
+    await db.execute("""
+        CREATE INDEX IF NOT EXISTS idx_pending_deletions_chat
+            ON pending_deletions(chat_id)
+    """)
+    await db.commit()
+
+
+async def _insert_pending_deletion(chat_id: int, message_id: int, delete_at: float):
+    """Persist a scheduled deletion to the DB."""
+    try:
+        async with aiosqlite.connect("user_states.db") as db:
+            await db.execute("PRAGMA journal_mode=WAL")
+            await db.execute(
+                "INSERT INTO pending_deletions (chat_id, message_id, delete_at) VALUES (?, ?, ?)",
+                (chat_id, message_id, delete_at)
+            )
+            await db.commit()
+    except Exception as e:
+        print(f"⚠️ [pending_deletions] insert error: {e}")
+
+
+async def _remove_pending_deletion(chat_id: int, message_id: int):
+    """Remove a deletion record once the message has been deleted."""
+    try:
+        async with aiosqlite.connect("user_states.db") as db:
+            await db.execute("PRAGMA journal_mode=WAL")
+            await db.execute(
+                "DELETE FROM pending_deletions WHERE chat_id = ? AND message_id = ?",
+                (chat_id, message_id)
+            )
+            await db.commit()
+    except Exception as e:
+        print(f"⚠️ [pending_deletions] remove error: {e}")
+
+
+async def _get_all_pending_deletions() -> list[tuple]:
+    """Return all (id, chat_id, message_id, delete_at) rows."""
+    rows = []
+    try:
+        async with aiosqlite.connect("user_states.db") as db:
+            async with db.execute(
+                "SELECT id, chat_id, message_id, delete_at FROM pending_deletions"
+            ) as cur:
+                rows = await cur.fetchall()
+    except Exception as e:
+        print(f"⚠️ [pending_deletions] fetch error: {e}")
+    return rows
+
+
+async def _delete_all_pending_deletions_db():
+    """Remove ALL rows from pending_deletions (used after bulk cleanup)."""
+    try:
+        async with aiosqlite.connect("user_states.db") as db:
+            await db.execute("PRAGMA journal_mode=WAL")
+            await db.execute("DELETE FROM pending_deletions")
+            await db.commit()
+    except Exception as e:
+        print(f"⚠️ [pending_deletions] delete-all error: {e}")
+
+
+
 # ── Called once from init_db() via post_init ────────────────────────
 async def _init_users_table(db):
     """Create bot_users table and indexes (called inside init_db)."""
@@ -616,7 +693,7 @@ async def create_shortened_link(user_id):
 
 
 async def delete_messages(context: ContextTypes.DEFAULT_TYPE):
-    """Delete messages after 20 minutes"""
+    """Delete messages after 20 minutes and remove from persistent registry."""
     job_data = context.job.data
     chat_id = job_data['chat_id']
     message_ids = job_data['message_ids']
@@ -627,6 +704,8 @@ async def delete_messages(context: ContextTypes.DEFAULT_TYPE):
             await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
         except Exception:
             pass  # Silently ignore — message may already be deleted
+        # Remove from the persistent pending-deletions registry
+        await _remove_pending_deletion(chat_id, message_id)
     
     # No notification message - keep the chat clean!
 
@@ -916,11 +995,16 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 save_user_states(user_states, _hint_uid=user_id)  # single flush
 
                 # Schedule deletion — only one message now (video+caption are the same msg)
+                _delete_at = _now_utc().timestamp() + 1200  # 20 min from now (Unix UTC)
                 context.job_queue.run_once(
                     delete_messages,
                     when=1200,  # 20 minutes
                     data={'chat_id': chat_id, 'message_ids': [video_msg.message_id]},
                     name=f"delete_{chat_id}_{video_msg.message_id}"
+                )
+                # Persist so the deletion survives a bot restart
+                asyncio.create_task(
+                    _insert_pending_deletion(chat_id, video_msg.message_id, _delete_at)
                 )
                 
                 video_sent = True
@@ -1451,11 +1535,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         print(f"⚠️ Error updating caption: {e}")
 
                 # Schedule deletion of the download copy only (1 message, not 2)
+                _dl_delete_at = _now_utc().timestamp() + 1200  # 20 min from now
                 context.job_queue.run_once(
                     delete_messages,
                     when=1200,  # 20 minutes
                     data={'chat_id': query.message.chat_id, 'message_ids': [download_msg.message_id]},
                     name=f"delete_download_{query.message.chat_id}_{download_msg.message_id}"
+                )
+                # Persist so the deletion survives a bot restart
+                asyncio.create_task(
+                    _insert_pending_deletion(
+                        query.message.chat_id, download_msg.message_id, _dl_delete_at
+                    )
                 )
                 
 
@@ -1478,16 +1569,57 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
+async def _startup_pending_deletion_cleanup(application: Application):
+    """On restart: delete overdue messages immediately; reschedule still-pending ones.
+
+    This handles the case where the bot was stopped while 20-min timers were
+    still running.  Any message whose deadline has passed is deleted right away;
+    messages still within their window get a new job for their remaining time.
+    """
+    rows = await _get_all_pending_deletions()
+    if not rows:
+        return
+
+    now_ts = _now_utc().timestamp()
+    rescheduled = 0
+    deleted_now = 0
+    errors = 0
+
+    for (row_id, chat_id, message_id, delete_at) in rows:
+        remaining = delete_at - now_ts
+        if remaining <= 0:
+            # Overdue — delete immediately
+            try:
+                await application.bot.delete_message(chat_id=chat_id, message_id=message_id)
+                deleted_now += 1
+            except Exception:
+                errors += 1  # already deleted or other error — ignore
+            await _remove_pending_deletion(chat_id, message_id)
+        else:
+            # Still within window — reschedule for remaining seconds
+            application.job_queue.run_once(
+                delete_messages,
+                when=remaining,
+                data={'chat_id': chat_id, 'message_ids': [message_id]},
+                name=f"delete_{chat_id}_{message_id}"
+            )
+            rescheduled += 1
+
+    print(f"🧹 Startup cleanup: {deleted_now} overdue videos deleted, "
+          f"{rescheduled} rescheduled, {errors} already gone")
+
+
 async def post_init(application: Application):
     """Initialize bot after startup"""
     # 1. Init SQLite DB for user_states and start flush loop
     await init_db()
     start_flush_loop()
 
-    # 2. Init bot_users table in the same DB and load users into cache
+    # 2. Init bot_users table + pending_deletions table; load users into cache
     async with aiosqlite.connect("user_states.db") as db:
         await db.execute("PRAGMA journal_mode=WAL")
         await _init_users_table(db)
+        await _init_pending_deletions_table(db)
         await _load_users_from_db(db)
         # Migrate users.json if it exists and bot_users table is empty
         if not _users_cache and os.path.exists(OLD_USERS_JSON):
@@ -1503,6 +1635,9 @@ async def post_init(application: Application):
     _bot_users_flush_task = asyncio.create_task(
         _bot_users_flush_loop(), name="bot_users_flush"
     )
+
+    # 5. Handle orphaned pending-deletion jobs from previous run
+    await _startup_pending_deletion_cleanup(application)
 
 async def post_shutdown(application: Application):
     """Clean shutdown: flush all dirty writes and close all DB/HTTP connections."""
@@ -1641,6 +1776,59 @@ async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"  ✅ Currently active premium: `{s['premium_active_now']}`\n"
     )
     await update.message.reply_text(text, parse_mode='Markdown')
+
+
+async def admin_clean_videos_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only: /cleanvideos — immediately delete ALL pending video messages for all users.
+
+    Use this after a bot restart to clean up videos whose 20-min deletion
+    timers were cancelled.  The command reads every entry in pending_deletions,
+    fires delete_message for each one, then clears the table.
+    """
+    if not _is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ You are not authorized to use this command.")
+        return
+
+    status_msg = await update.message.reply_text(
+        "🧹 *Cleaning stuck video messages…*\n\n"
+        "Deleting all pending videos for all users…",
+        parse_mode='Markdown'
+    )
+
+    rows = await _get_all_pending_deletions()
+    if not rows:
+        await status_msg.edit_text(
+            "✅ *Nothing to clean!*\n\n"
+            "No pending video deletions found in the database.",
+            parse_mode='Markdown'
+        )
+        return
+
+    deleted = 0
+    already_gone = 0
+    total = len(rows)
+
+    for (row_id, chat_id, message_id, delete_at) in rows:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+            deleted += 1
+        except Exception:
+            already_gone += 1  # message was already gone — still count it as cleaned
+        await asyncio.sleep(0.05)  # 50 ms rate-limit guard
+
+    # Wipe the entire table now that everything is handled
+    await _delete_all_pending_deletions_db()
+
+    await status_msg.edit_text(
+        f"✅ *Video Cleanup Complete!*\n\n"
+        f"📋 Total entries found: `{total}`\n"
+        f"🗑️ Deleted successfully: `{deleted}`\n"
+        f"👻 Already deleted/gone: `{already_gone}`\n\n"
+        f"All pending deletion records cleared from DB.",
+        parse_mode='Markdown'
+    )
+    print(f"🧹 [admin_clean_videos] {deleted} deleted, {already_gone} already gone, {total} total")
+
 
 async def send_daily_admin_report(context: ContextTypes.DEFAULT_TYPE):
     """Scheduled job: sends the day's stats to admin at 11:58 PM IST every day."""
@@ -1930,6 +2118,7 @@ def main():
         # ── Admin commands (@Deep12048 only) ──
         application.add_handler(CommandHandler("stats", admin_stats_command))
         application.add_handler(CommandHandler("deletebroadcast", admin_delete_broadcast_command))
+        application.add_handler(CommandHandler("cleanvideos", admin_clean_videos_command))
 
         # Broadcast ConversationHandler in group=-1 (highest priority).
         # MUST be group=-1, not group=0. Reason:
