@@ -220,6 +220,92 @@ async def _delete_all_pending_deletions_db():
     except Exception as e:
         print(f"⚠️ [pending_deletions] delete-all error: {e}")
 
+# ── Persistent Video Ratings ─────────────────────────────────────────────────
+async def _init_ratings_table(db):
+    """Create video_ratings and user_votes tables."""
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS video_ratings (
+            message_id INTEGER PRIMARY KEY,
+            likes INTEGER NOT NULL DEFAULT 0,
+            dislikes INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS user_votes (
+            user_id INTEGER NOT NULL,
+            message_id INTEGER NOT NULL,
+            vote_type TEXT NOT NULL,
+            PRIMARY KEY (user_id, message_id)
+        )
+    """)
+    await db.commit()
+
+async def _get_video_rating_buttons(message_id: int) -> list[InlineKeyboardButton]:
+    """Returns a list with Like, Percentage, and Dislike buttons."""
+    likes = 0
+    dislikes = 0
+    try:
+        async with aiosqlite.connect("user_states.db") as db:
+            async with db.execute("SELECT likes, dislikes FROM video_ratings WHERE message_id = ?", (message_id,)) as cur:
+                row = await cur.fetchone()
+                if row:
+                    likes, dislikes = row[0], row[1]
+    except Exception as e:
+        print(f"⚠️ [ratings] fetch error: {e}")
+
+    total = likes + dislikes
+    if total > 0:
+        pct = int((likes / total) * 100)
+        pct_text = f"{pct}%"
+    else:
+        pct_text = "0%"
+
+    return [
+        InlineKeyboardButton("👍", callback_data=f"vote_like_{message_id}"),
+        InlineKeyboardButton(pct_text, callback_data=f"vote_none_{message_id}"),
+        InlineKeyboardButton("👎", callback_data=f"vote_dislike_{message_id}")
+    ]
+
+async def _record_video_vote(user_id: int, message_id: int, vote_type: str) -> tuple[bool, str]:
+    """Records a vote (like or dislike) and returns (changed, message)."""
+    try:
+        async with aiosqlite.connect("user_states.db") as db:
+            await db.execute("PRAGMA journal_mode=WAL")
+            
+            # Check existing vote
+            async with db.execute("SELECT vote_type FROM user_votes WHERE user_id = ? AND message_id = ?", (user_id, message_id)) as cur:
+                existing = await cur.fetchone()
+                
+            if existing:
+                old_vote = existing[0]
+                if old_vote == vote_type:
+                    return False, "You already voted this!"
+                
+                # Switch vote
+                await db.execute("UPDATE user_votes SET vote_type = ? WHERE user_id = ? AND message_id = ?", (vote_type, user_id, message_id))
+                
+                if vote_type == 'like':
+                    await db.execute("UPDATE video_ratings SET likes = likes + 1, dislikes = MAX(0, dislikes - 1) WHERE message_id = ?", (message_id,))
+                else:
+                    await db.execute("UPDATE video_ratings SET dislikes = dislikes + 1, likes = MAX(0, likes - 1) WHERE message_id = ?", (message_id,))
+                
+                await db.commit()
+                return True, "Vote changed!"
+            else:
+                # New vote
+                await db.execute("INSERT INTO user_votes (user_id, message_id, vote_type) VALUES (?, ?, ?)", (user_id, message_id, vote_type))
+                await db.execute("INSERT OR IGNORE INTO video_ratings (message_id, likes, dislikes) VALUES (?, 0, 0)", (message_id,))
+                
+                if vote_type == 'like':
+                    await db.execute("UPDATE video_ratings SET likes = likes + 1 WHERE message_id = ?", (message_id,))
+                else:
+                    await db.execute("UPDATE video_ratings SET dislikes = dislikes + 1 WHERE message_id = ?", (message_id,))
+            
+                await db.commit()
+                return True, "Vote registered!"
+    except Exception as e:
+        print(f"⚠️ [ratings] Record error: {e}")
+        return False, "Database error."
 
 
 # ── Called once from init_db() via post_init ────────────────────────
@@ -962,6 +1048,11 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
                 # Build inline keyboard
                 keyboard = []
+                
+                # Add Like/Dislike buttons as first row
+                like_dislike_row = await _get_video_rating_buttons(message_id)
+                keyboard.append(like_dislike_row)
+                
                 if can_show_download_button:
                     remaining = download_limit - downloaded_count
                     download_callback = f"download_{message_id}"
@@ -1487,6 +1578,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Update the original message buttons
                 keyboard = []
                 
+                # Add Like/Dislike buttons as first row back
+                like_dislike_row = await _get_video_rating_buttons(message_id)
+                keyboard.append(like_dislike_row)
+                
                 # Show updated download button or remove it if no downloads left
                 if remaining > 0:
                     download_callback = f"download_{message_id}"
@@ -1567,7 +1662,48 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                      "Could not process download request. Please try again."
             )
 
+    elif query.data.startswith('vote_'):
+        # Format: vote_like_{message_id} or vote_dislike_{message_id} or vote_none_{message_id}
+        parts = query.data.split('_')
+        if len(parts) >= 3:
+            vote_type = parts[1]  # 'like', 'dislike', or 'none'
 
+            if vote_type == 'none':
+                try:
+                    await context.bot.answer_callback_query(callback_query_id=query.id, text="Likes Percentage")
+                except Exception:
+                    pass
+                return
+
+            try:
+                message_id = int(parts[2])
+                user_id = query.from_user.id
+                
+                changed, msg = await _record_video_vote(user_id, message_id, vote_type)
+                
+                if changed:
+                    # Optional: Popup toast instead of message box (show_alert=False)
+                    await context.bot.answer_callback_query(callback_query_id=query.id, text=msg)
+                    
+                    # Update the keyboard with new percentages
+                    try:
+                        old_markup = query.message.reply_markup.inline_keyboard
+                        # old_markup is a list of rows, we just overwrite the first row.
+                        new_markup = list(old_markup)
+                        new_markup[0] = await _get_video_rating_buttons(message_id)
+                        
+                        await query.message.edit_reply_markup(
+                            reply_markup=InlineKeyboardMarkup(new_markup)
+                        )
+                    except Exception as e:
+                        if "Message is not modified" not in str(e):
+                            print(f"⚠️ Error updating vote keyboard: {e}")
+                else:
+                    await context.bot.answer_callback_query(callback_query_id=query.id, text=msg)
+
+            except Exception as e:
+                print(f"⚠️ Error processing vote: {e}")
+                await context.bot.answer_callback_query(callback_query_id=query.id, text="Error. Please try again.")
 
 async def _startup_pending_deletion_cleanup(application: Application):
     """On restart: delete overdue messages immediately; reschedule still-pending ones.
@@ -1615,11 +1751,12 @@ async def post_init(application: Application):
     await init_db()
     start_flush_loop()
 
-    # 2. Init bot_users table + pending_deletions table; load users into cache
+    # 2. Init bot_users table + pending_deletions table + ratings tables; load users into cache
     async with aiosqlite.connect("user_states.db") as db:
         await db.execute("PRAGMA journal_mode=WAL")
         await _init_users_table(db)
         await _init_pending_deletions_table(db)
+        await _init_ratings_table(db)
         await _load_users_from_db(db)
         # Migrate users.json if it exists and bot_users table is empty
         if not _users_cache and os.path.exists(OLD_USERS_JSON):
