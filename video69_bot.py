@@ -261,9 +261,9 @@ async def _get_video_rating_buttons(message_id: int) -> list[InlineKeyboardButto
         pct_text = "0%"
 
     return [
-        InlineKeyboardButton("👍", callback_data=f"vote_like_{message_id}"),
+        InlineKeyboardButton("👍 Like", callback_data=f"vote_like_{message_id}"),
         InlineKeyboardButton(pct_text, callback_data=f"vote_none_{message_id}"),
-        InlineKeyboardButton("👎", callback_data=f"vote_dislike_{message_id}")
+        InlineKeyboardButton("👎 Dislike", callback_data=f"vote_dislike_{message_id}")
     ]
 
 async def _record_video_vote(user_id: int, message_id: int, vote_type: str) -> tuple[bool, str]:
