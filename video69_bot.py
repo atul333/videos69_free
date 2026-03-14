@@ -2009,6 +2009,128 @@ async def send_daily_admin_report(context: ContextTypes.DEFAULT_TYPE):
         print(f"⚠️ Daily admin report failed: {e}")
 
 
+async def admin_video_likes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only: /videolikes — show like/dislike stats for all rated videos.
+
+    Reports:
+      • Overall totals (total votes, total likes, total dislikes, overall %)
+      • Top 5 most-liked videos (highest like %)
+      • Bottom 5 least-liked videos (lowest like %)
+    Only videos that have received at least one vote are included.
+    """
+    if not _is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ You are not authorized to use this command.")
+        return
+
+    try:
+        async with aiosqlite.connect("user_states.db") as db:
+            async with db.execute(
+                "SELECT message_id, likes, dislikes FROM video_ratings ORDER BY message_id"
+            ) as cur:
+                rows = await cur.fetchall()
+    except Exception as e:
+        await update.message.reply_text(f"❌ Database error: {e}")
+        return
+
+    if not rows:
+        await update.message.reply_text(
+            "📊 *Video Likes Stats*\n\n"
+            "No votes have been recorded yet.\n"
+            "Users need to like or dislike videos first!",
+            parse_mode='Markdown'
+        )
+        return
+
+    # Filter to only videos with at least 1 vote and compute percentage
+    rated = []
+    for (message_id, likes, dislikes) in rows:
+        total = likes + dislikes
+        if total == 0:
+            continue
+        pct = (likes / total) * 100
+        rated.append({'id': message_id, 'likes': likes, 'dislikes': dislikes, 'total': total, 'pct': pct})
+
+    if not rated:
+        await update.message.reply_text(
+            "📊 *Video Likes Stats*\n\nNo videos have received any votes yet.",
+            parse_mode='Markdown'
+        )
+        return
+
+    # Overall totals
+    total_likes    = sum(v['likes']    for v in rated)
+    total_dislikes = sum(v['dislikes'] for v in rated)
+    total_votes    = total_likes + total_dislikes
+    overall_pct    = (total_likes / total_votes * 100) if total_votes > 0 else 0
+    rated_count    = len(rated)
+
+    # Sort: descending by pct for top, ascending for bottom
+    sorted_desc = sorted(rated, key=lambda v: v['pct'], reverse=True)
+    sorted_asc  = sorted(rated, key=lambda v: v['pct'])
+
+    top5    = sorted_desc[:5]
+    bottom5 = sorted_asc[:5]
+
+    def fmt_row(rank: int, v: dict) -> str:
+        bar_filled = int(v['pct'] / 10)   # 0-10 blocks
+        bar = '🟩' * bar_filled + '⬛' * (10 - bar_filled)
+        return (
+            f"  {rank}\. Video ID `{v['id']}`\n"
+            f"     👍 {v['likes']}  👎 {v['dislikes']}  │  {v['pct']:.1f}% liked\n"
+            f"     {bar}\n"
+        )
+
+    now_ist = (_now_utc() + _IST_OFFSET).strftime('%d %b %Y  %I:%M %p')
+
+    text  = (
+        f"📊 *Video Likes & Dislikes Report*\n"
+        f"⏰ `{now_ist} IST`\n"
+        f"{'━' * 28}\n\n"
+        f"🎬 *Videos rated:* `{rated_count}`\n"
+        f"👍 *Total likes:* `{total_likes}`\n"
+        f"👎 *Total dislikes:* `{total_dislikes}`\n"
+        f"🗳️ *Total votes:* `{total_votes}`\n"
+        f"📈 *Overall like rate:* `{overall_pct:.1f}%`\n\n"
+    )
+
+    text += f"🏆 *Top 5 — Most Liked Videos*\n"
+    for i, v in enumerate(top5, 1):
+        text += fmt_row(i, v)
+    text += "\n"
+
+    text += f"💔 *Bottom 5 — Least Liked Videos*\n"
+    for i, v in enumerate(bottom5, 1):
+        text += fmt_row(i, v)
+
+    await update.message.reply_text(text, parse_mode='Markdown')
+
+
+async def admin_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only: /adminhelp — list every available admin command with a description."""
+    if not _is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ You are not authorized to use this command.")
+        return
+
+    text = (
+        "🛠️ *Admin Command Reference*\n"
+        f"{'━' * 28}\n\n"
+        "📊 *Statistics & Reports*\n"
+        "  /stats — Live user & activity stats\n"
+        "  /videolikes — Like/dislike stats for all videos\n"
+        "             (overall totals + top 5 & bottom 5)\n\n"
+        "📢 *Broadcasts*\n"
+        "  /broadcast — Send a message to ALL users\n"
+        "  /deletebroadcast — Delete a previously sent broadcast\n\n"
+        "🧹 *Maintenance*\n"
+        "  /cleanvideos — Delete overdue video messages\n"
+        "               (stuck after bot restart)\n\n"
+        "ℹ️ *Help*\n"
+        "  /adminhelp — Show this help message\n\n"
+        "_All commands are restricted to the bot admin only._"
+    )
+    await update.message.reply_text(text, parse_mode='Markdown')
+
+
 async def admin_broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin-only: /broadcast  — step 1, ask admin to send the message."""
     if not _is_admin(update.effective_user.id):
@@ -2271,6 +2393,8 @@ def main():
         application.add_handler(CommandHandler("stats", admin_stats_command))
         application.add_handler(CommandHandler("deletebroadcast", admin_delete_broadcast_command))
         application.add_handler(CommandHandler("cleanvideos", admin_clean_videos_command))
+        application.add_handler(CommandHandler("videolikes", admin_video_likes_command))
+        application.add_handler(CommandHandler("adminhelp", admin_help_command))
 
         # Broadcast ConversationHandler in group=-1 (highest priority).
         # MUST be group=-1, not group=0. Reason:
