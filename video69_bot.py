@@ -2066,9 +2066,11 @@ async def admin_video_likes_command(update: Update, context: ContextTypes.DEFAUL
     overall_pct    = (total_likes / total_votes * 100) if total_votes > 0 else 0
     rated_count    = len(rated)
 
-    # Sort: descending by pct for top, ascending for bottom
-    sorted_desc = sorted(rated, key=lambda v: v['pct'], reverse=True)
-    sorted_asc  = sorted(rated, key=lambda v: v['pct'])
+    # Sort with tie-breaking:
+    #   Top 5    — highest like% first; on tie, more likes wins
+    #   Bottom 5 — lowest like% first; on tie, more dislikes wins
+    sorted_desc = sorted(rated, key=lambda v: (v['pct'], v['likes']),    reverse=True)
+    sorted_asc  = sorted(rated, key=lambda v: (v['pct'], -v['dislikes']))
 
     top5    = sorted_desc[:5]
     bottom5 = sorted_asc[:5]
