@@ -1899,11 +1899,12 @@ async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     s = _get_today_stats()
     now_ist = (_now_utc() + _IST_OFFSET).strftime('%d %b %Y  %I:%M %p')
+    sep = "━" * 28
 
     text = (
         f"📊 *Admin Stats — Live*\n"
         f"⏰ As of: `{now_ist} IST`\n"
-        f"━" * 28 + "\n\n"
+        f"{sep}\n\n"
         f"👥 *Total registered users:* `{s['total_users']}`\n\n"
         f"📅 *Today\u2019s Activity*\n"
         f"  ▶️  Active users (watched video): `{s['active_today']}`\n"
@@ -1986,10 +1987,11 @@ async def send_daily_admin_report(context: ContextTypes.DEFAULT_TYPE):
     """Scheduled job: sends the day's stats to admin at 11:58 PM IST every day."""
     s       = _get_today_stats()
     now_ist = (_now_utc() + _IST_OFFSET).strftime('%d %b %Y')
+    sep = "━" * 28
 
     text = (
         f"📊 *Daily Report — {now_ist}*\n"
-        f"━" * 28 + "\n\n"
+        f"{sep}\n\n"
         f"👥 *Total registered users:* `{s['total_users']}`\n\n"
         f"📅 *Today\u2019s Activity*\n"
         f"  ▶️  Active users (watched video): `{s['active_today']}`\n"
