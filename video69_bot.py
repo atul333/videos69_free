@@ -96,9 +96,9 @@ DOWNLOADABLE_VIDEOS_LIMIT = 2
 # Number of videos that can be downloaded by premium users (every 24 hours)
 PREMIUM_DOWNLOADABLE_VIDEOS_LIMIT = 20
 
-# AroLinks API Configuration
-AROLINK_API_TOKEN = "cf0c76a4739d65e08d5990b0db1865b680f1de4a"
-AROLINK_API_URL = "https://arolinks.com/api"
+# AntByps URL Shortener API Configuration
+AROLINK_API_TOKEN = "1RcGYNOXGXYp9YeYHLvBBUp3HE5Uktfzl7Ua3QJO"
+AROLINK_API_URL = "https://antbyps.vercel.app/api"
 # Bot username for deep links (from .env)
 BOT_USERNAME = os.getenv('BOT_USERNAME', 'Test_videos69_bot')
 # Secret key for encrypting verification tokens — load from .env
