@@ -129,11 +129,11 @@ def _now_utc() -> datetime:
         _now_cache[1] = mono
     return _now_cache[0]
 
-# Mandatory channels — users must join BOTH to use the bot
-MANDATORY_CHANNEL        = -1003827947228           # Channel 1: Backup Videos69
-MANDATORY_CHANNEL_LINK   = "https://t.me/+8MA7MsUSTD0zZDMx"
-MANDATORY_CHANNEL_2      = -1003747307292           # Channel 2: Backup Videos69
-MANDATORY_CHANNEL_2_LINK = "https://t.me/+twTah7XKdRUxNGVl"
+# Mandatory channels — loaded from .env (change without touching code)
+MANDATORY_CHANNEL        = int(os.getenv('MANDATORY_CHANNEL_1_ID',   '-1003827947228'))
+MANDATORY_CHANNEL_LINK   = os.getenv('MANDATORY_CHANNEL_1_LINK', 'https://t.me/+8MA7MsUSTD0zZDMx')
+MANDATORY_CHANNEL_2      = int(os.getenv('MANDATORY_CHANNEL_2_ID',   '-1003747307292'))
+MANDATORY_CHANNEL_2_LINK = os.getenv('MANDATORY_CHANNEL_2_LINK', 'https://t.me/+twTah7XKdRUxNGVl')
 
 # ── Bot users registry (persisted in user_states.db, 'bot_users' table) ──────
 # All reads come from _users_cache (instant, no I/O).
