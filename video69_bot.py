@@ -88,11 +88,11 @@ used_tokens: set = set()
 _MAX_USED_TOKENS = 10000  # Evict oldest when this limit is reached
 
 # Video limit for free users (resets every 24 hours)
-DAILY_VIDEO_LIMIT = 3  # Free users can watch 3 videos per day
+DAILY_VIDEO_LIMIT = 1  # Free users can watch 1 video per day
 # Premium access duration after watching ad (12 hours)
 PREMIUM_DURATION_HOURS = 12
 # Number of videos that can be downloaded/saved by normal users (every 24 hours)
-DOWNLOADABLE_VIDEOS_LIMIT = 2
+DOWNLOADABLE_VIDEOS_LIMIT = 1
 # Number of videos that can be downloaded by premium users (every 24 hours)
 PREMIUM_DOWNLOADABLE_VIDEOS_LIMIT = 20
 
@@ -950,8 +950,8 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                              f"✅ **Premium unlocks instantly** after watching!\n\n"
                              f"🎁 **What you get:**\n"
                              f"• 🔓 Unlimited videos for **12 hours**\n"
-                             f"• 📥 **20 downloads** (instead of 2)\n\n"
-                             f"⏳ Or wait **{time_msg}** to get **3 free videos** again at midnight.\n\n"
+                             f"• 📥 **20 downloads** (instead of 1)\n\n"
+                             f"⏳ Or wait **{time_msg}** to get **1 free video** again at midnight.\n\n"
                              f"⬇️ One tap → Instant premium access:",
                         parse_mode='Markdown',
                         reply_markup=reply_markup
@@ -979,7 +979,7 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             reply_markup = InlineKeyboardMarkup(keyboard)
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"🚫 **You've Watched All 3 Free Videos!**\n\n"
+                text=f"🚫 **You've Watched Your 1 Free Video!**\n\n"
                      f"To continue watching, you must **watch 1 short ad** to unlock Premium Access.\n\n"
                      f"━━━━━━━━━━━━━━━━━━━━\n"
                      f"🎯 **HOW TO UNLOCK PREMIUM:**\n"
@@ -988,8 +988,8 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                      f"✅ **Premium unlocks instantly** after watching!\n\n"
                      f"🎁 **What you get:**\n"
                      f"• 🔓 Unlimited videos for **12 hours**\n"
-                     f"• 📥 **20 downloads** (instead of 2)\n\n"
-                     f"⏳ Or wait **{time_msg}** to get **3 free videos** again at midnight.\n\n"
+                     f"• 📥 **20 downloads** (instead of 1)\n\n"
+                     f"⏳ Or wait **{time_msg}** to get **1 free video** again at midnight.\n\n"
                      f"⬇️ One tap → Instant premium access:",
                 parse_mode='Markdown',
                 reply_markup=reply_markup
@@ -1039,7 +1039,7 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                     else:
                         caption_text = (
                             f"👆 Enjoy the video!\n\n"
-                            f"🔒 Download limit reached ({download_limit} videos).\n\n"
+                            f"🔒 Download limit reached ({download_limit} video).\n\n"
                             f"💎 Want 20 downloads per day?\n"
                             f"Watch an ad for Premium Access:\n"
                             f"✅ Unlimited videos + 20 downloads!\n\n"
@@ -1268,10 +1268,10 @@ Hello {first_name}! 👋
 
 I'm here to share amazing videos with you!
 
-🎥 You can watch **3 free videos per day**!
+🎥 You can watch **1 free video per day**!
 ⏰ Your limit resets every **24 hours at midnight IST**
 
-💾 You can **download 2 videos per day**!
+💾 You can **download 1 video per day**!
 
 💎 Want unlimited access? Watch an ad to get **12 hours of premium**!
 
@@ -1390,8 +1390,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"✅ **Verified!**\n\n"
                     f"Welcome {first_name}! 👋\n\n"
                     f"You've successfully joined both channels!\n\n"
-                    f"🎥 You can watch **3 free videos** per day!\n"
-                    f"📥 You can download **2 videos** per day!\n"
+                    f"🎥 You can watch **1 free video** per day!\n"
+                    f"📥 You can download **1 video** per day!\n"
                     f"⏰ Limits reset every **24 hours at midnight IST**!\n\n"
                     f"💎 Want unlimited access? Watch an ad for **12 hours of premium**!\n\n"
                     f"Click below to start watching! 🍿",
@@ -1540,18 +1540,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                              "⏱️ Resets every **24 hours at midnight IST**"
                     )
                 else:
-                    # Free user reached their 2 download limit - show premium promotion
+                    # Free user reached their 1 download limit - show premium promotion
                     keyboard = [[InlineKeyboardButton("📺 Watch Ad for Premium", callback_data='watch_ad')]]
                     reply_markup = InlineKeyboardMarkup(keyboard)
                     
                     await context.bot.send_message(
                         chat_id=query.message.chat_id,
                         text="❌ **Download Limit Reached!**\n\n"
-                             f"You've already downloaded {download_limit} videos today.\n\n"
+                             f"You've already downloaded {download_limit} video today.\n\n"
                              "💎 **Want More Downloads?**\n"
                              "Watch an ad to get Premium Access:\n\n"
                              "✅ **Unlimited** video watching\n"
-                             "✅ **20 downloads** per day (10x more!)\n"
+                             "✅ **20 downloads** per day (20x more!)\n"
                              "✅ **12 hours** of premium access\n\n"
                              "⏱️ Limits reset every **24 hours at midnight (12:00 AM IST)**\n\n"
                              "Click below to watch an ad and unlock premium! 🚀",
