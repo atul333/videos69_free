@@ -99,6 +99,9 @@ PREMIUM_DOWNLOADABLE_VIDEOS_LIMIT = 20
 # AroLinks URL Shortener API Configuration
 AROLINK_API_TOKEN = "cf0c76a4739d65e08d5990b0db1865b680f1de4a"
 AROLINK_API_URL = "https://arolinks.com/api"
+# VPLink URL Shortener API Configuration
+VPLINK_API_TOKEN = "686ddc23e543449e56029d3de0a59e19677617de"
+VPLINK_API_URL = "https://vplink.in/api"
 # Bot username for deep links (from .env)
 BOT_USERNAME = os.getenv('BOT_USERNAME', 'Test_videos69_bot')
 # Secret key for encrypting verification tokens — load from .env
@@ -746,13 +749,35 @@ async def _shorten_via_arolinks(bot_deep_link: str, alias: str, user_id: int) ->
     return None
 
 
-async def create_shortened_link(user_id):
-    """Create a unique shortened link via AroLinks that opens the bot with encrypted token."""
+async def _shorten_via_vplink(bot_deep_link: str, alias: str, user_id: int) -> str | None:
+    """Try to shorten a link via VPLink. Returns shortened URL or None."""
+    api_url = f"{VPLINK_API_URL}?api={VPLINK_API_TOKEN}&url={bot_deep_link}&alias={alias}_vp"
+    try:
+        session = await _get_http_session()
+        async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+            if response.status == 200:
+                result = await response.json(content_type=None)
+                if result.get("status") == "success":
+                    shortened_url = result.get("shortenedUrl", "").strip()
+                    print(f"✅ [VPLink] Shortened link for user {user_id}: {shortened_url}")
+                    return shortened_url
+                else:
+                    print(f"❌ [VPLink] API error: {result.get('message', 'Unknown error')}")
+            else:
+                print(f"❌ [VPLink] HTTP {response.status}")
+    except Exception as e:
+        print(f"❌ [VPLink] Exception: {e}")
+    return None
+
+
+async def create_shortened_links(user_id) -> tuple[str | None, str | None]:
+    """Create unique shortened links via BOTH AroLinks and VPLink concurrently.
+    Returns (arolinks_url, vplink_url) — either may be None on failure."""
     if user_id not in user_states:
         init_user_state(user_id)
 
     # Generate a unique verification token
-    timestamp = int(_now_utc().timestamp())  # reuse cached now
+    timestamp = int(_now_utc().timestamp())
     random_part = random.randint(10000, 99999)
     token_data = f"{user_id}_{timestamp}_{random_part}"
     encrypted_token = hashlib.sha256(f"{token_data}_{SECRET_KEY}".encode()).hexdigest()[:16]
@@ -766,15 +791,26 @@ async def create_shortened_link(user_id):
     bot_deep_link = f"https://t.me/{BOT_USERNAME}?start={full_token}"
     alias = f"v_{user_id}_{timestamp}"
 
-    shortened_url = await _shorten_via_arolinks(bot_deep_link, alias, user_id)
+    # Call BOTH shorteners concurrently
+    aro_url, vp_url = await asyncio.gather(
+        _shorten_via_arolinks(bot_deep_link, alias, user_id),
+        _shorten_via_vplink(bot_deep_link, alias, user_id),
+    )
 
-    if shortened_url:
-        user_states[user_id]['ad_link'] = shortened_url
+    if aro_url:
+        user_states[user_id]['ad_link'] = aro_url
         save_user_states(user_states, _hint_uid=user_id)
-        return shortened_url
 
-    print(f"❌ AroLinks failed for user {user_id}")
-    return None
+    if not aro_url and not vp_url:
+        print(f"❌ Both shorteners failed for user {user_id}")
+
+    return aro_url, vp_url
+
+
+# Legacy alias kept for any remaining call sites
+async def create_shortened_link(user_id):
+    aro_url, _ = await create_shortened_links(user_id)
+    return aro_url
 
 
 
@@ -932,11 +968,14 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                         time_msg = f"{hours_until_reset} hour(s) and {minutes_until_reset % 60} minute(s)"
                     else:
                         time_msg = f"{minutes_until_reset} minute(s)"
-                    # Generate shortened link upfront — 1-click direct ad access
-                    shortened_link = await create_shortened_link(user_id)
-                    if shortened_link:
-                        keyboard = [[InlineKeyboardButton("🔥▶️ Watch Ad → Get FREE Premium! 🎁", url=shortened_link)]]
-                    else:
+                    # Generate shortened links from BOTH services concurrently
+                    aro_url, vp_url = await create_shortened_links(user_id)
+                    keyboard = []
+                    if aro_url:
+                        keyboard.append([InlineKeyboardButton("🔥 AroLinks — Watch Ad & Get Premium", url=aro_url)])
+                    if vp_url:
+                        keyboard.append([InlineKeyboardButton("⚡ VPLink — Watch Ad & Get Premium", url=vp_url)])
+                    if not keyboard:
                         keyboard = [[InlineKeyboardButton("🔥▶️ Watch Ad → Get FREE Premium! 🎁", callback_data='watch_ad')]]
                     reply_markup = InlineKeyboardMarkup(keyboard)
                     await context.bot.send_message(
@@ -970,11 +1009,14 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 time_msg = f"{hours_until_reset} hour(s) and {minutes_until_reset % 60} minute(s)"
             else:
                 time_msg = f"{minutes_until_reset} minute(s)"
-            # Generate shortened link upfront — 1-click direct ad access
-            shortened_link = await create_shortened_link(user_id)
-            if shortened_link:
-                keyboard = [[InlineKeyboardButton("🔥▶️ Watch Ad → Get FREE Premium! 🎁", url=shortened_link)]]
-            else:
+            # Generate shortened links from BOTH services concurrently
+            aro_url, vp_url = await create_shortened_links(user_id)
+            keyboard = []
+            if aro_url:
+                keyboard.append([InlineKeyboardButton("🔥 AroLinks — Watch Ad & Get Premium", url=aro_url)])
+            if vp_url:
+                keyboard.append([InlineKeyboardButton("⚡ VPLink — Watch Ad & Get Premium", url=vp_url)])
+            if not keyboard:
                 keyboard = [[InlineKeyboardButton("🔥▶️ Watch Ad → Get FREE Premium! 🎁", callback_data='watch_ad')]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await context.bot.send_message(
@@ -1458,25 +1500,29 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
     
     elif query.data == 'watch_ad':
-        # Create a unique shortened link for this user
+        # Create unique shortened links from BOTH services concurrently
         user_id = query.from_user.id
-        shortened_link = await create_shortened_link(user_id)
-        
-        if shortened_link:
-            # Show ad watching instructions with the shortened link
-            keyboard = [
-                [InlineKeyboardButton("📺 Click Here to Watch Ad", url=shortened_link)],
-                [InlineKeyboardButton("❓ How to Open Link", callback_data='how_to_open')]
-            ]
+        aro_url, vp_url = await create_shortened_links(user_id)
+
+        if aro_url or vp_url:
+            keyboard = []
+            if aro_url:
+                keyboard.append([InlineKeyboardButton("🔥 AroLinks — Watch Ad & Get Premium", url=aro_url)])
+            if vp_url:
+                keyboard.append([InlineKeyboardButton("⚡ VPLink — Watch Ad & Get Premium", url=vp_url)])
+            keyboard.append([InlineKeyboardButton("❓ How to Open Link", callback_data='how_to_open')])
             reply_markup = InlineKeyboardMarkup(keyboard)
-            
+
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
                 text="📺 **Watch Ad to Get Premium Access**\n\n"
+                     "👇 **Choose any link below** — both give you the same premium!\n\n"
+                     "🔥 **AroLinks** — tap if VPLink doesn't work for you\n"
+                     "⚡ **VPLink** — tap if AroLinks doesn't work for you\n\n"
                      "🎯 **Instructions**:\n"
-                     "1. Click the 'Click Here to Watch Ad' button below\n"
+                     "1. Tap any link button below\n"
                      "2. Complete the ad verification process\n"
-                     "3. You'll be automatically redirected back to the bot\n"
+                     "3. You'll be redirected back to the bot\n"
                      "4. **Premium will activate automatically!**\n\n"
                      "⚠️ **iOS Users**: Copy the link and open it in Chrome browser\n\n"
                      "💎 You'll get **12 hours of unlimited video access**!",
@@ -1484,7 +1530,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=reply_markup
             )
         else:
-            # Error creating link
+            # Both shorteners failed
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
                 text="❌ Error creating ad link. Please try again later."
