@@ -31,7 +31,7 @@ from user_state_storage import (
     get_stats
 )
 
-# Import shared premium sync (cross-bot premium sharing)
+# Import shared sync (cross-bot premium + download sharing)
 from premium_sync import (
     init_premium_sync,
     is_premium_synced,
@@ -39,6 +39,11 @@ from premium_sync import (
     get_premium_until_synced,
     revoke_premium_synced,
     invalidate_cache as _invalidate_premium_cache,
+    # Download sync
+    get_synced_download_count,
+    increment_synced_download,
+    reset_synced_downloads,
+    get_total_synced_downloads_today,
 )
 
 # Load environment variables
@@ -1098,7 +1103,8 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 message_id = get_random_video(user_id)
 
                 # is_premium already computed above — reuse it, no extra syscall
-                downloaded_count = user_states[user_id].get('downloaded_count', 0)
+                # Read download count from shared DB so all bots see the same number
+                downloaded_count = await get_synced_download_count(user_id)
                 download_limit = PREMIUM_DOWNLOADABLE_VIDEOS_LIMIT if is_premium else DOWNLOADABLE_VIDEOS_LIMIT
                 can_show_download_button = downloaded_count < download_limit
                 
@@ -1615,17 +1621,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             message_id = int(query.data.split('_')[1])
             user_id = query.from_user.id
-            
-            # Initialize downloaded_count if it doesn't exist
-            if 'downloaded_count' not in user_states[user_id]:
-                user_states[user_id]['downloaded_count'] = 0
-            
-            downloaded_count = user_states[user_id]['downloaded_count']
-            
-            # Determine download limit based on premium status
-            is_premium = is_premium_user(user_id)
+
+            # Determine premium status (uses async cross-bot check)
+            is_premium = await is_premium_user_async(user_id)
             download_limit = PREMIUM_DOWNLOADABLE_VIDEOS_LIMIT if is_premium else DOWNLOADABLE_VIDEOS_LIMIT
-            
+
+            # Read shared download count (counts downloads across ALL bots today)
+            downloaded_count = await get_synced_download_count(user_id)
+
             # Check if user still has downloads remaining
             if downloaded_count >= download_limit:
                 # Show different messages for premium vs free users
@@ -1642,7 +1645,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     # Free user reached their 1 download limit - show premium promotion
                     keyboard = [[InlineKeyboardButton("📺 Watch Ad for Premium", callback_data='watch_ad')]]
                     reply_markup = InlineKeyboardMarkup(keyboard)
-                    
+
                     await context.bot.send_message(
                         chat_id=query.message.chat_id,
                         text="❌ **Download Limit Reached!**\n\n"
@@ -1658,7 +1661,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         reply_markup=reply_markup
                     )
                 return
-            
+
             # Send unprotected copy of the video
             try:
                 download_msg = await context.bot.copy_message(
@@ -1667,13 +1670,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     message_id=message_id,
                     protect_content=False  # Unprotected - can be downloaded/saved/forwarded
                 )
-                
-                # Increment download count
-                user_states[user_id]['downloaded_count'] += 1
-                save_user_states(user_states, _hint_uid=user_id)
-                
-                remaining = download_limit - user_states[user_id]['downloaded_count']
-                
+
+                # ── Shared increment (writes to central DB — all bots see this) ──
+                new_shared_count = await increment_synced_download(user_id)
+
+                # ── Local increment (keeps local user_states in sync too) ────────
+                if user_id in user_states:
+                    user_states[user_id]['downloaded_count'] = new_shared_count
+                    save_user_states(user_states, _hint_uid=user_id)
+
+                remaining = download_limit - new_shared_count
+
+
                 # Update the original message buttons
                 keyboard = []
                 

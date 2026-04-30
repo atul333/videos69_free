@@ -1,28 +1,39 @@
 """
-premium_sync.py — Shared Premium Database (Cross-Bot Sync)
------------------------------------------------------------
+premium_sync.py — Shared Premium + Download Database (Cross-Bot Sync)
+----------------------------------------------------------------------
 All bot instances on the same server read/write from ONE central SQLite file.
-When any bot grants premium to a user, every other bot immediately sees it.
+
+What is synced:
+  1. PREMIUM status  — unlocked on any bot, visible on all bots  (≤60 s)
+  2. DOWNLOAD count  — downloaded on any bot, counted on all bots (immediate)
+     Daily download limits reset at midnight IST across all bots together.
 
 Architecture:
-  • Central DB: /home/ubuntu/premium_shared.db  (absolute path, same for all bots)
-  • All reads: in-memory cache (fast, zero I/O on hot path)
-  • Cache TTL: 60 seconds per user — auto-refreshed from DB on expiry
-  • All writes: instant to SQLite, cache updated immediately
-  • Thread-safe: uses asyncio.Lock for concurrent write protection
+  • Central DB   : /home/ubuntu/premium_shared.db  (same absolute path for every bot)
+  • Premium reads : in-memory cache (TTL=60 s) — max 1 DB read per user per minute
+  • Download reads: always fresh from DB (single fast SELECT, no cache needed)
+  • Download writes: atomic increment via SQL (safe under concurrent bots)
+  • Thread-safe    : asyncio.Lock for write operations
 
 Usage in video69_bot.py:
-    from premium_sync import is_premium_synced, grant_premium_synced, init_premium_sync
+    from premium_sync import (
+        init_premium_sync,
+        is_premium_synced, grant_premium_synced, get_premium_until_synced,
+        get_synced_download_count, increment_synced_download,
+        reset_synced_downloads_if_new_day,
+        invalidate_cache,
+    )
 
-    # On startup (inside post_init):
-    await init_premium_sync()
+    await init_premium_sync()                          # call once in post_init
 
-    # Check premium (replaces local is_premium_user):
-    if await is_premium_synced(user_id):
-        ...
-
-    # Grant premium (replaces local grant_premium_access):
+    # Premium
+    if await is_premium_synced(user_id): ...
     await grant_premium_synced(user_id, hours=12)
+
+    # Downloads
+    count = await get_synced_download_count(user_id)   # how many downloaded today
+    await increment_synced_download(user_id)            # record a new download
+    await reset_synced_downloads_if_new_day(user_id)   # auto-reset at midnight IST
 """
 
 import os
@@ -33,235 +44,370 @@ from typing import Optional, Dict, Tuple
 
 # ── Config ────────────────────────────────────────────────────────────────────
 # ALL bots on the same server must use this exact path.
-# Change only if your bots run on different servers (then use a shared NFS mount).
 SHARED_DB_PATH = os.getenv("SHARED_PREMIUM_DB", "/home/ubuntu/premium_shared.db")
 
-# How long (seconds) to trust a cached premium result before re-checking DB.
-# 60 s = good balance: fresh enough that a cross-bot grant propagates quickly.
-CACHE_TTL_SECONDS = 60
+# IST offset (UTC+5:30) — used for midnight reset of download counts
+_IST = timedelta(hours=5, minutes=30)
 
-# ── In-memory cache ───────────────────────────────────────────────────────────
-# { user_id: (premium_until: Optional[datetime], cached_at: float) }
-_cache: Dict[int, Tuple[Optional[datetime], float]] = {}
+# Premium cache TTL: how long (seconds) to trust a cached result before re-querying DB.
+# 60 s = fresh enough that a cross-bot premium grant propagates quickly.
+PREMIUM_CACHE_TTL = 60
+
+# ── In-memory caches ──────────────────────────────────────────────────────────
+# Premium: { user_id: (premium_until, cached_at_monotonic) }
+_prem_cache: Dict[int, Tuple[Optional[datetime], float]] = {}
+
 _write_lock = asyncio.Lock()
 _db_ready = False
 
 
-# ── SQL ───────────────────────────────────────────────────────────────────────
-_CREATE_TABLE = """
+# ── SQL schemas ───────────────────────────────────────────────────────────────
+_DDL = """
+-- ── Shared premium table ──────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS shared_premium (
     user_id       INTEGER PRIMARY KEY,
     premium_until TEXT,               -- ISO-8601 UTC, NULL = no premium
     updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
-)
-"""
-_CREATE_IDX = """
+);
 CREATE INDEX IF NOT EXISTS idx_sp_premium
     ON shared_premium(premium_until)
-    WHERE premium_until IS NOT NULL
+    WHERE premium_until IS NOT NULL;
+
+-- ── Shared download counter table ────────────────────────────────────────
+-- reset_date is stored as YYYY-MM-DD in IST so each bot knows when to reset
+CREATE TABLE IF NOT EXISTS shared_downloads (
+    user_id          INTEGER PRIMARY KEY,
+    downloaded_count INTEGER NOT NULL DEFAULT 0,
+    reset_date       TEXT    NOT NULL DEFAULT ''   -- IST date 'YYYY-MM-DD'
+);
 """
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Internal helpers ──────────────────────────────────────────────────────────
 def _ser(dt: Optional[datetime]) -> Optional[str]:
-    if dt is None:
-        return None
-    return dt.isoformat()
+    return dt.isoformat() if dt else None
 
 
 def _des(s) -> Optional[datetime]:
-    if s is None or not isinstance(s, str):
+    if not s or not isinstance(s, str):
         return None
     try:
         dt = datetime.fromisoformat(s)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
     except ValueError:
         return None
 
 
-def _now() -> datetime:
+def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _today_ist() -> str:
+    """Return today's date in IST as 'YYYY-MM-DD' string."""
+    return (_now_utc() + _IST).strftime("%Y-%m-%d")
+
+
+async def _open_db() -> aiosqlite.Connection:
+    """Open the shared DB with WAL mode enabled."""
+    db = await aiosqlite.connect(SHARED_DB_PATH)
+    await db.execute("PRAGMA journal_mode=WAL")
+    await db.execute("PRAGMA synchronous=NORMAL")
+    return db
 
 
 # ── Init ──────────────────────────────────────────────────────────────────────
 async def init_premium_sync():
-    """Create the shared DB table if it doesn't exist. Call once at startup."""
+    """
+    Create all shared tables if they don't exist. Call ONCE in post_init.
+    Sets _db_ready=True on success; on failure bots degrade gracefully to
+    independent operation (no crash, just no cross-bot sync).
+    """
     global _db_ready
     try:
-        async with aiosqlite.connect(SHARED_DB_PATH) as db:
-            await db.execute("PRAGMA journal_mode=WAL")
-            await db.execute("PRAGMA synchronous=NORMAL")
-            await db.execute(_CREATE_TABLE)
-            await db.execute(_CREATE_IDX)
-            await db.commit()
+        db = await _open_db()
+        # Execute each statement individually (aiosqlite doesn't support executescript)
+        for stmt in _DDL.split(";"):
+            stmt = stmt.strip()
+            if stmt:
+                await db.execute(stmt)
+        await db.commit()
+        await db.close()
         _db_ready = True
-        print(f"✅ [PremiumSync] Shared DB ready: {SHARED_DB_PATH}")
+        print(f"✅ [SharedSync] Shared DB ready: {SHARED_DB_PATH}")
     except Exception as e:
-        print(f"⚠️ [PremiumSync] Could not init shared DB: {e}")
-        print(f"⚠️ [PremiumSync] Premium sync disabled — bots will work independently.")
+        print(f"⚠️ [SharedSync] Could not init shared DB: {e}")
+        print(f"⚠️ [SharedSync] Running without cross-bot sync.")
         _db_ready = False
 
 
-# ── Core read ─────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#  PREMIUM SYNC
+# ══════════════════════════════════════════════════════════════════════════════
+
 async def _fetch_premium_until(user_id: int) -> Optional[datetime]:
-    """Read premium_until from the shared DB. Returns None on error."""
+    """Read premium_until from shared DB (single SELECT, no cache)."""
     try:
-        async with aiosqlite.connect(SHARED_DB_PATH) as db:
-            async with db.execute(
-                "SELECT premium_until FROM shared_premium WHERE user_id = ?",
-                (user_id,)
-            ) as cur:
-                row = await cur.fetchone()
-                if row:
-                    return _des(row[0])
+        db = await _open_db()
+        async with db.execute(
+            "SELECT premium_until FROM shared_premium WHERE user_id = ?", (user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        await db.close()
+        return _des(row[0]) if row else None
     except Exception as e:
-        print(f"⚠️ [PremiumSync] Read error for user {user_id}: {e}")
-    return None
+        print(f"⚠️ [SharedSync] premium read error uid={user_id}: {e}")
+        return None
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
 async def is_premium_synced(user_id: int) -> bool:
     """
-    Return True if user has active premium in the SHARED database.
-    Uses in-memory cache (TTL=60s) — max 1 DB read per user per minute.
-    Falls back to False on DB error (fail-safe).
+    True if user has active premium in the shared DB.
+    Uses in-memory cache (TTL=60 s) — at most 1 DB read per user per minute.
+    Returns False on DB error (fail-safe).
     """
     if not _db_ready:
         return False
 
-    import time as _time_mod
-    now_mono = _time_mod.monotonic()
-    now_utc  = _now()
+    import time as _t
+    now_mono = _t.monotonic()
 
-    cached = _cache.get(user_id)
-    if cached is not None:
-        premium_until, cached_at = cached
-        if now_mono - cached_at < CACHE_TTL_SECONDS:
-            # Cache hit — return without DB access
-            return bool(premium_until) and now_utc < premium_until
+    cached = _prem_cache.get(user_id)
+    if cached:
+        puntil, at = cached
+        if now_mono - at < PREMIUM_CACHE_TTL:
+            return bool(puntil) and _now_utc() < puntil
 
-    # Cache miss or expired — re-read from shared DB
-    premium_until = await _fetch_premium_until(user_id)
-    _cache[user_id] = (premium_until, now_mono)
-    return bool(premium_until) and now_utc < premium_until
+    puntil = await _fetch_premium_until(user_id)
+    _prem_cache[user_id] = (puntil, now_mono)
+    return bool(puntil) and _now_utc() < puntil
 
 
 async def grant_premium_synced(user_id: int, hours: int = 12) -> datetime:
     """
-    Grant premium to user_id for `hours` hours in the SHARED database.
-    Also updates the in-memory cache immediately.
-    Returns the new premium_until datetime (UTC).
-
-    All other bots will see this within CACHE_TTL_SECONDS (≤60 s).
+    Write premium_until to the shared DB and update local cache immediately.
+    All other bots will see this within PREMIUM_CACHE_TTL seconds (≤60 s).
+    Returns the new premium_until (UTC).
     """
-    premium_until = _now() + timedelta(hours=hours)
+    puntil = _now_utc() + timedelta(hours=hours)
 
     if not _db_ready:
-        # Graceful degradation: just update cache, no DB write
-        import time as _time_mod
-        _cache[user_id] = (premium_until, _time_mod.monotonic())
-        return premium_until
+        import time as _t
+        _prem_cache[user_id] = (puntil, _t.monotonic())
+        return puntil
 
     async with _write_lock:
         try:
-            async with aiosqlite.connect(SHARED_DB_PATH) as db:
-                await db.execute("PRAGMA journal_mode=WAL")
-                await db.execute("""
-                    INSERT INTO shared_premium (user_id, premium_until, updated_at)
-                    VALUES (?, ?, datetime('now'))
-                    ON CONFLICT(user_id) DO UPDATE SET
-                        premium_until = excluded.premium_until,
-                        updated_at    = excluded.updated_at
-                """, (user_id, _ser(premium_until)))
-                await db.commit()
+            db = await _open_db()
+            await db.execute("""
+                INSERT INTO shared_premium (user_id, premium_until, updated_at)
+                VALUES (?, ?, datetime('now'))
+                ON CONFLICT(user_id) DO UPDATE SET
+                    premium_until = excluded.premium_until,
+                    updated_at    = excluded.updated_at
+            """, (user_id, _ser(puntil)))
+            await db.commit()
+            await db.close()
 
-            # Immediately update local cache so the granting bot doesn't re-read DB
-            import time as _time_mod
-            _cache[user_id] = (premium_until, _time_mod.monotonic())
-            print(f"✅ [PremiumSync] Premium granted for user {user_id} until {premium_until.isoformat()}")
+            import time as _t
+            _prem_cache[user_id] = (puntil, _t.monotonic())
+            print(f"✅ [SharedSync] Premium granted uid={user_id} until {puntil.isoformat()}")
         except Exception as e:
-            print(f"⚠️ [PremiumSync] Write error for user {user_id}: {e}")
+            print(f"⚠️ [SharedSync] premium write error uid={user_id}: {e}")
 
-    return premium_until
+    return puntil
 
 
 async def get_premium_until_synced(user_id: int) -> Optional[datetime]:
     """
-    Return the premium_until datetime for the user from the shared DB.
-    Returns None if user has no premium or premium has expired.
-    Uses the same cache as is_premium_synced().
+    Return active premium_until datetime from shared DB (cached).
+    Returns None if no premium or it has expired.
     """
     if not _db_ready:
         return None
 
-    import time as _time_mod
-    now_mono = _time_mod.monotonic()
+    import time as _t
+    now_mono = _t.monotonic()
 
-    cached = _cache.get(user_id)
-    if cached is not None:
-        premium_until, cached_at = cached
-        if now_mono - cached_at < CACHE_TTL_SECONDS:
-            now_utc = _now()
-            return premium_until if (premium_until and now_utc < premium_until) else None
+    cached = _prem_cache.get(user_id)
+    if cached:
+        puntil, at = cached
+        if now_mono - at < PREMIUM_CACHE_TTL:
+            return puntil if (puntil and _now_utc() < puntil) else None
 
-    premium_until = await _fetch_premium_until(user_id)
-    _cache[user_id] = (premium_until, now_mono)
-    now_utc = _now()
-    return premium_until if (premium_until and now_utc < premium_until) else None
+    puntil = await _fetch_premium_until(user_id)
+    _prem_cache[user_id] = (puntil, now_mono)
+    return puntil if (puntil and _now_utc() < puntil) else None
 
 
 async def revoke_premium_synced(user_id: int):
-    """
-    Manually revoke premium (set premium_until = NULL) in the shared DB.
-    Useful for admin commands.
-    """
+    """Set premium_until = NULL in the shared DB (admin tool)."""
     if not _db_ready:
         return
-
     async with _write_lock:
         try:
-            async with aiosqlite.connect(SHARED_DB_PATH) as db:
-                await db.execute("""
-                    UPDATE shared_premium
-                    SET premium_until = NULL, updated_at = datetime('now')
-                    WHERE user_id = ?
-                """, (user_id,))
-                await db.commit()
-            import time as _time_mod
-            _cache[user_id] = (None, _time_mod.monotonic())
-            print(f"🗑️ [PremiumSync] Premium revoked for user {user_id}")
+            db = await _open_db()
+            await db.execute(
+                "UPDATE shared_premium SET premium_until=NULL, updated_at=datetime('now') "
+                "WHERE user_id=?", (user_id,)
+            )
+            await db.commit()
+            await db.close()
+            import time as _t
+            _prem_cache[user_id] = (None, _t.monotonic())
+            print(f"🗑️ [SharedSync] Premium revoked uid={user_id}")
         except Exception as e:
-            print(f"⚠️ [PremiumSync] Revoke error for user {user_id}: {e}")
+            print(f"⚠️ [SharedSync] revoke error uid={user_id}: {e}")
 
 
-async def get_all_premium_users() -> Dict[int, datetime]:
-    """
-    Return {user_id: premium_until} for all users with active premium.
-    Used for admin stats.
-    """
+async def get_all_premium_users_synced() -> Dict[int, datetime]:
+    """Return {user_id: premium_until} for all currently active premium users."""
     result = {}
     if not _db_ready:
         return result
     try:
-        now_iso = _ser(_now())
-        async with aiosqlite.connect(SHARED_DB_PATH) as db:
-            async with db.execute(
-                "SELECT user_id, premium_until FROM shared_premium "
-                "WHERE premium_until IS NOT NULL AND premium_until > ?",
-                (now_iso,)
-            ) as cur:
-                async for row in cur:
-                    uid = row[0]
-                    puntil = _des(row[1])
-                    if puntil:
-                        result[uid] = puntil
+        db = await _open_db()
+        now_iso = _ser(_now_utc())
+        async with db.execute(
+            "SELECT user_id, premium_until FROM shared_premium "
+            "WHERE premium_until IS NOT NULL AND premium_until > ?", (now_iso,)
+        ) as cur:
+            async for row in cur:
+                puntil = _des(row[1])
+                if puntil:
+                    result[row[0]] = puntil
+        await db.close()
     except Exception as e:
-        print(f"⚠️ [PremiumSync] get_all_premium_users error: {e}")
+        print(f"⚠️ [SharedSync] get_all_premium_users error: {e}")
     return result
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  DOWNLOAD SYNC
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def get_synced_download_count(user_id: int) -> int:
+    """
+    Return how many downloads this user has made TODAY (IST) across ALL bots.
+    If the stored reset_date is older than today, returns 0 (treats as reset).
+    Returns 0 on DB error (fail-open — don't block downloads on DB failure).
+    """
+    if not _db_ready:
+        return 0
+    today = _today_ist()
+    try:
+        db = await _open_db()
+        async with db.execute(
+            "SELECT downloaded_count, reset_date FROM shared_downloads WHERE user_id=?",
+            (user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        await db.close()
+
+        if row is None:
+            return 0
+        count, reset_date = row[0], row[1]
+        # If the stored date is from a previous day, treat as 0 (new day)
+        return count if reset_date == today else 0
+    except Exception as e:
+        print(f"⚠️ [SharedSync] download read error uid={user_id}: {e}")
+        return 0
+
+
+async def increment_synced_download(user_id: int) -> int:
+    """
+    Atomically increment the shared download counter for user_id (today IST).
+    If the stored date is a previous day, resets the counter to 1 first.
+    Returns the NEW total download count after increment.
+    """
+    if not _db_ready:
+        return 0
+
+    today = _today_ist()
+    async with _write_lock:
+        try:
+            db = await _open_db()
+
+            async with db.execute(
+                "SELECT downloaded_count, reset_date FROM shared_downloads WHERE user_id=?",
+                (user_id,)
+            ) as cur:
+                row = await cur.fetchone()
+
+            if row is None:
+                # First ever download for this user
+                new_count = 1
+                await db.execute(
+                    "INSERT INTO shared_downloads (user_id, downloaded_count, reset_date) "
+                    "VALUES (?, 1, ?)",
+                    (user_id, today)
+                )
+            elif row[1] != today:
+                # New day — reset counter to 1
+                new_count = 1
+                await db.execute(
+                    "UPDATE shared_downloads SET downloaded_count=1, reset_date=? WHERE user_id=?",
+                    (today, user_id)
+                )
+            else:
+                # Same day — increment
+                new_count = row[0] + 1
+                await db.execute(
+                    "UPDATE shared_downloads SET downloaded_count=downloaded_count+1 WHERE user_id=?",
+                    (user_id,)
+                )
+
+            await db.commit()
+            await db.close()
+            print(f"📥 [SharedSync] Download #{new_count} recorded for uid={user_id} (date={today})")
+            return new_count
+        except Exception as e:
+            print(f"⚠️ [SharedSync] download write error uid={user_id}: {e}")
+            return 0
+
+
+async def reset_synced_downloads(user_id: int):
+    """
+    Manually reset a user's shared download counter to 0.
+    Useful for admin commands or midnight cron cleanup.
+    """
+    if not _db_ready:
+        return
+    async with _write_lock:
+        try:
+            db = await _open_db()
+            await db.execute(
+                "UPDATE shared_downloads SET downloaded_count=0, reset_date=? WHERE user_id=?",
+                (_today_ist(), user_id)
+            )
+            await db.commit()
+            await db.close()
+            print(f"🔄 [SharedSync] Downloads reset for uid={user_id}")
+        except Exception as e:
+            print(f"⚠️ [SharedSync] download reset error uid={user_id}: {e}")
+
+
+async def get_total_synced_downloads_today() -> int:
+    """Return total downloads across ALL users today (for admin stats)."""
+    if not _db_ready:
+        return 0
+    today = _today_ist()
+    try:
+        db = await _open_db()
+        async with db.execute(
+            "SELECT SUM(downloaded_count) FROM shared_downloads WHERE reset_date=?", (today,)
+        ) as cur:
+            row = await cur.fetchone()
+        await db.close()
+        return row[0] or 0 if row else 0
+    except Exception as e:
+        print(f"⚠️ [SharedSync] total downloads error: {e}")
+        return 0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  CACHE UTILITIES
+# ══════════════════════════════════════════════════════════════════════════════
+
 def invalidate_cache(user_id: int):
-    """Force a cache eviction for a specific user (call after local state changes)."""
-    _cache.pop(user_id, None)
+    """Force premium cache eviction for a user (no download cache to clear)."""
+    _prem_cache.pop(user_id, None)
