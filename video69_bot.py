@@ -31,6 +31,16 @@ from user_state_storage import (
     get_stats
 )
 
+# Import shared premium sync (cross-bot premium sharing)
+from premium_sync import (
+    init_premium_sync,
+    is_premium_synced,
+    grant_premium_synced,
+    get_premium_until_synced,
+    revoke_premium_synced,
+    invalidate_cache as _invalidate_premium_cache,
+)
+
 # Load environment variables
 load_dotenv()
 
@@ -664,11 +674,37 @@ def init_user_state(user_id):
 
 
 def is_premium_user(user_id: int) -> bool:
-    """Return True if user has active premium. Uses cached _now_utc() — zero syscall."""
+    """Return True if user has active premium (local state only — fast sync path).
+    The shared DB check is done asynchronously via is_premium_user_async().
+    This sync version is kept for backward compatibility with non-async callers.
+    """
     if user_id not in user_states:
         init_user_state(user_id)
     premium_until = user_states[user_id].get('premium_until')
     return bool(premium_until) and _now_utc() < premium_until
+
+
+async def is_premium_user_async(user_id: int) -> bool:
+    """Check premium against BOTH local state AND the shared cross-bot DB.
+    If either says the user is premium, they are treated as premium.
+    Shared DB check uses a 60-second cache — no DB hit on every request.
+    """
+    # Fast local check first (zero I/O)
+    if is_premium_user(user_id):
+        return True
+    # Cross-bot shared check (cached, ≤1 DB read per user per 60 s)
+    shared = await is_premium_synced(user_id)
+    if shared:
+        # Sync the shared premium status into local state so this bot
+        # stays consistent without hitting the shared DB on every call.
+        from premium_sync import get_premium_until_synced as _gpu
+        puntil = await _gpu(user_id)
+        if puntil:
+            if user_id not in user_states:
+                init_user_state(user_id)
+            user_states[user_id]['premium_until'] = puntil
+            save_user_states(user_states, _hint_uid=user_id)
+    return shared
 
 
 def check_and_reset_daily_limit(user_id: int) -> bool:
@@ -704,7 +740,9 @@ def utc_to_ist(utc_time: datetime) -> datetime:
 
 
 def grant_premium_access(user_id: int):
-    """Grant premium access for 12 hours after watching ad."""
+    """Grant premium access for 12 hours after watching ad (local state).
+    Use grant_premium_access_async() to also sync to the shared cross-bot DB.
+    """
     if user_id not in user_states:
         init_user_state(user_id)
     user_states[user_id]['premium_until'] = (
@@ -713,6 +751,18 @@ def grant_premium_access(user_id: int):
     # Invalidate membership cache so next check re-evaluates premium state
     _membership_cache.pop(user_id, None)
     save_user_states(user_states, _hint_uid=user_id)
+
+
+async def grant_premium_access_async(user_id: int):
+    """Grant premium access for 12 hours in BOTH local state AND the shared
+    cross-bot DB.  Call this instead of grant_premium_access() so that ALL
+    bots on the same server see the user as premium immediately.
+    """
+    # 1. Write to local state (instant)
+    grant_premium_access(user_id)
+    # 2. Write to shared DB (propagates to all other bots within cache TTL)
+    await grant_premium_synced(user_id, hours=PREMIUM_DURATION_HOURS)
+    print(f"🔗 [PremiumSync] Premium synced across all bots for user {user_id}")
 
 
 # ── Persistent aiohttp session (created once, reused for all HTTP requests) ──────
@@ -946,8 +996,8 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             )
             return
         
-        # Compute is_premium ONCE — no double call into can_watch_video
-        is_premium = is_premium_user(user_id)
+        # Compute is_premium ONCE — checks local state + shared cross-bot DB
+        is_premium = await is_premium_user_async(user_id)
         if not is_premium:
             check_and_reset_daily_limit(user_id)  # reset counter if new day
         can_watch = is_premium or user_states[user_id]['hourly_count'] < DAILY_VIDEO_LIMIT
@@ -1225,8 +1275,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if token_user_id == user_id:
                     # Check if this is the user's assigned token
                     if user_id in user_states and user_states[user_id].get('ad_token') == token:
-                        # Valid token! Grant premium access
-                        grant_premium_access(user_id)
+                        # Valid token! Grant premium access (local + shared cross-bot DB)
+                        await grant_premium_access_async(user_id)
                         used_tokens.add(token)  # Mark token as used
                         # Evict old tokens if set is too large
                         if len(used_tokens) > _MAX_USED_TOKENS:
@@ -1277,10 +1327,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             print(f"⚠️ Error validating token: {e}")
             # Continue to show welcome message if token is invalid
     
-    # Check if user already has premium
-    if is_premium_user(user_id):
-        premium_until = user_states[user_id]['premium_until']
-        time_remaining = premium_until - _now_utc()  # use cached now
+    # Check if user already has premium (checks both local state + shared cross-bot DB)
+    if await is_premium_user_async(user_id):
+        # Prefer premium_until from shared DB for correct cross-bot expiry display
+        premium_until = await get_premium_until_synced(user_id) or user_states.get(user_id, {}).get('premium_until')
+        if premium_until is None:
+            premium_until = _now_utc() + timedelta(hours=1)  # fallback
+        time_remaining = premium_until - _now_utc()
         hours_remaining = int(time_remaining.total_seconds() / 3600)
         minutes_remaining = int((time_remaining.total_seconds() % 3600) / 60)
         
@@ -1810,16 +1863,19 @@ async def post_init(application: Application):
 
     print(f"👥 {len(_users_cache)} registered users loaded from DB")
 
-    # 3. Load available video IDs from the channel
+    # 3. Init shared premium sync DB (cross-bot premium sharing)
+    await init_premium_sync()
+
+    # 4. Load available video IDs from the channel
     await load_videos_from_channel(application)
 
-    # 4. Start bot_users background flush loop
+    # 5. Start bot_users background flush loop
     global _bot_users_flush_task
     _bot_users_flush_task = asyncio.create_task(
         _bot_users_flush_loop(), name="bot_users_flush"
     )
 
-    # 5. Handle orphaned pending-deletion jobs from previous run
+    # 6. Handle orphaned pending-deletion jobs from previous run
     await _startup_pending_deletion_cleanup(application)
 
 async def post_shutdown(application: Application):
