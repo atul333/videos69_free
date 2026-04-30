@@ -189,11 +189,19 @@ async def grant_premium_synced(user_id: int, hours: int = 12) -> datetime:
     Returns the new premium_until (UTC).
     """
     puntil = _now_utc() + timedelta(hours=hours)
+    return await grant_premium_until_synced(user_id, puntil)
 
+
+async def grant_premium_until_synced(user_id: int, premium_until: datetime) -> datetime:
+    """
+    Write an EXACT premium_until datetime to the shared DB.
+    Use this when you need precise expiry (e.g. end of a specific day).
+    Returns premium_until unchanged.
+    """
     if not _db_ready:
         import time as _t
-        _prem_cache[user_id] = (puntil, _t.monotonic())
-        return puntil
+        _prem_cache[user_id] = (premium_until, _t.monotonic())
+        return premium_until
 
     async with _write_lock:
         try:
@@ -204,17 +212,17 @@ async def grant_premium_synced(user_id: int, hours: int = 12) -> datetime:
                 ON CONFLICT(user_id) DO UPDATE SET
                     premium_until = excluded.premium_until,
                     updated_at    = excluded.updated_at
-            """, (user_id, _ser(puntil)))
+            """, (user_id, _ser(premium_until)))
             await db.commit()
             await db.close()
 
             import time as _t
-            _prem_cache[user_id] = (puntil, _t.monotonic())
-            print(f"✅ [SharedSync] Premium granted uid={user_id} until {puntil.isoformat()}")
+            _prem_cache[user_id] = (premium_until, _t.monotonic())
+            print(f"✅ [SharedSync] Premium granted uid={user_id} until {premium_until.isoformat()}")
         except Exception as e:
             print(f"⚠️ [SharedSync] premium write error uid={user_id}: {e}")
 
-    return puntil
+    return premium_until
 
 
 async def get_premium_until_synced(user_id: int) -> Optional[datetime]:

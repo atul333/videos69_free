@@ -36,6 +36,7 @@ from premium_sync import (
     init_premium_sync,
     is_premium_synced,
     grant_premium_synced,
+    grant_premium_until_synced,
     get_premium_until_synced,
     revoke_premium_synced,
     invalidate_cache as _invalidate_premium_cache,
@@ -680,20 +681,34 @@ def init_user_state(user_id):
 
 def is_premium_user(user_id: int) -> bool:
     """Return True if user has active premium (local state only — fast sync path).
+    Also returns True on the May 1 2026 free-premium day.
     The shared DB check is done asynchronously via is_premium_user_async().
     This sync version is kept for backward compatibility with non-async callers.
     """
+    # May 1, 2026 = free premium day for everyone (IST)
+    if _is_may1_free_day():
+        return True
     if user_id not in user_states:
         init_user_state(user_id)
     premium_until = user_states[user_id].get('premium_until')
     return bool(premium_until) and _now_utc() < premium_until
 
 
+def _is_may1_free_day() -> bool:
+    """Return True if today (IST) is May 1, 2026 — the free-premium promotion day."""
+    now_ist = _now_utc() + _IST_OFFSET
+    return now_ist.year == 2026 and now_ist.month == 5 and now_ist.day == 1
+
+
 async def is_premium_user_async(user_id: int) -> bool:
     """Check premium against BOTH local state AND the shared cross-bot DB.
     If either says the user is premium, they are treated as premium.
+    Also returns True on the May 1 2026 free-premium promotion day.
     Shared DB check uses a 60-second cache — no DB hit on every request.
     """
+    # May 1 free-premium day — everyone is premium, no DB needed
+    if _is_may1_free_day():
+        return True
     # Fast local check first (zero I/O)
     if is_premium_user(user_id):
         return True
@@ -888,46 +903,98 @@ async def delete_messages(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def broadcast_daily_reset(context: ContextTypes.DEFAULT_TYPE):
-    """Broadcast message to all users about limit reset - sent every 24 hours at midnight"""
-    
+    """Broadcast message to all users about limit reset - sent every 24 hours at midnight IST.
+    On May 1, 2026, sends a special FREE PREMIUM DAY message and grants premium
+    to every registered user via the shared DB (so all bots honour it).
+    """
     print("\n" + "=" * 60)
     print("🔔 DAILY RESET BROADCAST TRIGGERED!")
     print("=" * 60)
-    
-    # Get current time in IST — use module-level cache and constant
+
+    # Get current time in IST
     current_time_ist = _now_utc() + _IST_OFFSET
-    time_str = current_time_ist.strftime('%I:00 %p')  # e.g., "12:00 AM"
-    date_str = current_time_ist.strftime('%B %d, %Y')  # e.g., "February 6, 2026"
-    
+    time_str = current_time_ist.strftime('%I:00 %p')   # e.g. "12:00 AM"
+    date_str = current_time_ist.strftime('%B %d, %Y')  # e.g. "May 01, 2026"
+
     print(f"⏰ Broadcasting at: {time_str} IST")
     print(f"📅 Date: {date_str}")
-    
-    # Create "Watch Now" button
-    keyboard = [[InlineKeyboardButton("🎬 Watch Now", callback_data='next_video')]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    message_text = (
-        f"🎬 **Daily Limit Reset!** 🎬\n\n"
-        f"⏰ Time: **{time_str} IST**\n"
-        f"📅 Date: **{date_str}**\n\n"
-        f"✨ Your limits have been renewed!\n"
-        f"🎥 You can now watch **3 free videos**\n"
-        f"📥 You can download **2 videos**\n"
-        f"💎 Premium users get **20 downloads**!\n\n"
-        f"⏱️ Limits reset every **24 hours at midnight**\n"
-        f"💎 Want unlimited videos + 20 downloads? Watch an ad!\n\n"
-        f"Click below to start watching!\n\n"
-        f"Enjoy! 🍿"
+
+    # ── May 1 free-premium-day branch ────────────────────────────────────────
+    is_may1 = (
+        current_time_ist.year == 2026 and
+        current_time_ist.month == 5 and
+        current_time_ist.day == 1
     )
-    
-    # Load user IDs from file (persistent storage)
-    user_ids = get_all_user_ids()
-    
-    # Send to all users
+
+    if is_may1:
+        print("🎉 MAY 1 FREE PREMIUM DAY BROADCAST!")
+
+        keyboard = [
+            [InlineKeyboardButton("🎬 Watch Unlimited Now!", callback_data='next_video')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        message_text = (
+            f"🎉 **Happy May Day! Free Premium for Everyone!** 🎉\n\n"
+            f"📅 Date: **{date_str}**\n\n"
+            f"👋 Hello! As a special gift for **May Day**, we are giving "
+            f"**FREE Premium Access** to ALL users for the entire day!\n\n"
+            f"⭐ **What you get TODAY — absolutely FREE:**\n"
+            f"• 🔓 **Unlimited videos** all day long\n"
+            f"• 📥 **20 downloads** today\n"
+            f"• ⏰ Valid till **11:59 PM IST tonight**\n\n"
+            f"⚠️ **From May 2 onwards**, regular limits resume.\n"
+            f"Watch an ad anytime to unlock premium again!\n\n"
+            f"🍿 Enjoy your free premium day! Click below to start watching!"
+        )
+
+        # Grant premium valid until 11:59:59 PM IST on May 1 to every registered user.
+        # Uses the shared DB so ALL bots on the server honour this grant automatically.
+        may1_end_utc = current_time_ist.replace(
+            hour=23, minute=59, second=59, microsecond=0
+        ) - _IST_OFFSET   # IST 23:59:59 → UTC (18:29:59 UTC)
+
+        user_ids = get_all_user_ids()
+        grant_ok = 0
+        grant_errors = 0
+        for uid in user_ids:
+            try:
+                await grant_premium_until_synced(uid, may1_end_utc)
+                grant_ok += 1
+            except Exception as grant_err:
+                grant_errors += 1
+                if grant_errors <= 3:   # log first 3 errors only
+                    print(f"⚠️ May1 grant error uid={uid}: {grant_err}")
+
+        print(f"🎉 May 1 free premium granted to {grant_ok}/{len(user_ids)} users (errors: {grant_errors})")
+
+
+    else:
+        # ── Normal daily-reset message ────────────────────────────────────────
+        keyboard = [[InlineKeyboardButton("🎬 Watch Now", callback_data='next_video')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        message_text = (
+            f"🎬 **Daily Limit Reset!** 🎬\n\n"
+            f"⏰ Time: **{time_str} IST**\n"
+            f"📅 Date: **{date_str}**\n\n"
+            f"✨ Your limits have been renewed!\n"
+            f"🎥 You can now watch **3 free videos**\n"
+            f"📥 You can download **2 videos**\n"
+            f"💎 Premium users get **20 downloads**!\n\n"
+            f"⏱️ Limits reset every **24 hours at midnight**\n"
+            f"💎 Want unlimited videos + 20 downloads? Watch an ad!\n\n"
+            f"Click below to start watching!\n\n"
+            f"Enjoy! 🍿"
+        )
+
+        user_ids = get_all_user_ids()
+
+    # ── Send broadcast to all users ───────────────────────────────────────────
     successful = 0
     failed = 0
     blocked_users = []
-    
+
     for user_id in user_ids:
         try:
             await context.bot.send_message(
@@ -937,21 +1004,17 @@ async def broadcast_daily_reset(context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=reply_markup
             )
             successful += 1
-            await asyncio.sleep(0.05)  # 50ms delay — Telegram allows ~30 msg/sec per token
-
-            
+            await asyncio.sleep(0.05)  # 50 ms — Telegram allows ~30 msg/sec per token
         except Exception as e:
             failed += 1
-            
-            # Track blocked users to remove from file
             if "Forbidden" in str(e) or "blocked" in str(e).lower():
                 blocked_users.append(user_id)
-    
-    # Remove blocked users from file (batch operation - very efficient)
+
+    # Remove users who blocked the bot
     if blocked_users:
         batch_remove_users(blocked_users)
-    
-    print(f"📢 Daily reset broadcast complete! Sent to {successful} users, {failed} failed")
+
+    print(f"📢 Broadcast complete! Sent to {successful} users, {failed} failed")
     print(f"⏰ Broadcast time: {time_str} IST")
     print(f"📅 Broadcast date: {date_str}")
     print(f"👥 Total users in database: {get_user_count()}")
