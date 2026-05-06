@@ -2529,7 +2529,7 @@ async def admin_video_likes_command(update: Update, context: ContextTypes.DEFAUL
         bar_filled = int(v['pct'] / 10)   # 0-10 blocks
         bar = '🟩' * bar_filled + '⬛' * (10 - bar_filled)
         return (
-            f"  {rank}\. Video ID `{v['id']}`\n"
+            f"  {rank}\\. Video ID `{v['id']}`\n"
             f"     👍 {v['likes']}  👎 {v['dislikes']}  │  {v['pct']:.1f}% liked\n"
             f"     {bar}\n"
         )

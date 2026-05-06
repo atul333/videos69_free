@@ -5,3 +5,4 @@ aiosqlite==0.20.0
 pytz==2024.1
 aiofiles==23.2.1
 # razorpay_payment.py uses only aiohttp + aiosqlite (already above) — no extra package needed
+Pillow==10.3.0
