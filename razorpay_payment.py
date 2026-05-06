@@ -33,6 +33,10 @@ logger.info("[RZP] KEY_ID=%s  SECRET=%s",
             'SET' if RZP_KEY_ID else 'MISSING',
             'SET' if RZP_KEY_SECRET else 'MISSING')
 
+# In-memory dedup: prevents duplicate notifications when Razorpay fires
+# multiple webhook events (payment.authorized + qr_code.credited, etc.) simultaneously
+_processed_payments: set = set()
+
 # Legacy single-plan env vars kept for /buy command fallback
 RZP_AMOUNT = int(os.getenv("RZP_PREMIUM_AMOUNT", "4900"))
 RZP_HOURS  = int(os.getenv("RZP_PREMIUM_HOURS",  "720"))
@@ -80,10 +84,11 @@ CREATE INDEX IF NOT EXISTS idx_rzp_user ON rzp_payments(user_id);
 """
 # New columns added after initial release — migrated safely
 _NEW_COLS = [
-    ("chat_id",       "INTEGER"),
-    ("qr_message_id", "INTEGER"),
-    ("plan_key",      "TEXT NOT NULL DEFAULT '?'"),
-    ("plan_name",     "TEXT NOT NULL DEFAULT 'Premium'"),
+    ("chat_id",          "INTEGER"),
+    ("qr_message_id",    "INTEGER"),
+    ("limit_message_id", "INTEGER"),   # message_id of 'Video Limit Reached!' plan-buttons msg
+    ("plan_key",         "TEXT NOT NULL DEFAULT '?'"),
+    ("plan_name",        "TEXT NOT NULL DEFAULT 'Premium'"),
 ]
 
 async def _ensure_payments_table():
@@ -134,12 +139,26 @@ async def store_qr_message_id(pl_id: str, qr_msg_id: int):
     except Exception as e:
         print(f"⚠️ [RZP] store_qr_msg_id: {e}")
 
+async def store_limit_message_id(pl_id: str, limit_msg_id: int):
+    """Store the 'Video Limit Reached!' message_id so it can be deleted after payment."""
+    try:
+        db = await aiosqlite.connect(SHARED_DB_PATH)
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute(
+            "UPDATE rzp_payments SET limit_message_id=? WHERE payment_link_id=?",
+            (limit_msg_id, pl_id)
+        )
+        await db.commit()
+        await db.close()
+    except Exception as e:
+        print(f"⚠️ [RZP] store_limit_msg_id: {e}")
+
 async def _get_record(pl_id: str) -> Optional[dict]:
     try:
         db = await aiosqlite.connect(SHARED_DB_PATH)
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT user_id,chat_id,qr_message_id,plan_key,plan_name,"
+            "SELECT user_id,chat_id,qr_message_id,limit_message_id,plan_key,plan_name,"
             "amount_paise,premium_hours,status FROM rzp_payments WHERE payment_link_id=?",
             (pl_id,)
         ) as cur:
@@ -354,33 +373,44 @@ def _ts_to_str(ts) -> str:
 
 async def _handle_success(pl_id, payment_id, user_id_s, event_name,
                            amount_paid, contact, email_, paid_at_str, plan_key, plan_name):
+    global _processed_payments
+    # Fast in-memory dedup — catches simultaneous duplicate webhook events before DB hit
+    dedup_key = payment_id or pl_id
+    if dedup_key and dedup_key in _processed_payments:
+        logger.info(f"[RZP] In-memory dedup skip: {dedup_key}")
+        return
+    if dedup_key:
+        _processed_payments.add(dedup_key)
+
     if not user_id_s:
-        print(f"⚠️ [RZP] No user_id in notes pl_id={pl_id}")
+        logger.warning(f"[RZP] No user_id in notes pl_id={pl_id}")
         return
     try:
         user_id = int(user_id_s)
     except ValueError:
         return
 
-    # Fetch record
+    # DB dedup — catches duplicates across bot restarts
     record = await _get_record(pl_id) if pl_id else None
     if record and record.get("status") == "paid":
-        print(f"ℹ️ [RZP] Duplicate webhook pl_id={pl_id} — skip")
+        logger.info(f"[RZP] DB dedup skip pl_id={pl_id}")
         return
 
     # Resolve plan details
     if record:
-        plan_key  = record.get("plan_key") or plan_key
-        plan_name = record.get("plan_name") or plan_name
-        hours     = record.get("premium_hours") or PLANS.get(plan_key, ("",24))[1]
-        chat_id   = record.get("chat_id") or user_id
-        qr_msg_id = record.get("qr_message_id")
-        amt_paise = record.get("amount_paise") or amount_paid
+        plan_key      = record.get("plan_key")      or plan_key
+        plan_name     = record.get("plan_name")     or plan_name
+        hours         = record.get("premium_hours") or PLANS.get(plan_key, ("",24))[1]
+        chat_id       = record.get("chat_id")       or user_id
+        qr_msg_id     = record.get("qr_message_id")
+        limit_msg_id  = record.get("limit_message_id")
+        amt_paise     = record.get("amount_paise")  or amount_paid
     else:
-        hours     = PLANS.get(plan_key, ("",24))[1]
-        chat_id   = user_id
-        qr_msg_id = None
-        amt_paise = amount_paid
+        hours         = PLANS.get(plan_key, ("",24))[1]
+        chat_id       = user_id
+        qr_msg_id     = None
+        limit_msg_id  = None
+        amt_paise     = amount_paid
 
     amt_inr  = amt_paise / 100
     is_life  = (hours >= 87600)
@@ -391,24 +421,33 @@ async def _handle_success(pl_id, payment_id, user_id_s, event_name,
     try:
         from premium_sync import grant_premium_synced
         premium_until = await grant_premium_synced(user_id, hours=hours)
-        print(f"✅ [RZP] Premium uid={user_id} {plan_name} until {premium_until.isoformat()}")
+        logger.info(f"[RZP] Premium granted uid={user_id} {plan_name} until {premium_until.isoformat()}")
     except Exception as e:
-        print(f"❌ [RZP] grant_premium_synced: {e}")
+        logger.error(f"[RZP] grant_premium_synced: {e}")
         return
 
+    # Mark paid IMMEDIATELY — before sending Telegram messages to prevent race-condition dupes
     if pl_id:
         await _record_paid(pl_id, payment_id)
 
     if _tg_app is None:
         return
 
-    # Delete QR message
+    # Delete QR photo message
     if qr_msg_id and chat_id:
         try:
             await _tg_app.bot.delete_message(chat_id=chat_id, message_id=qr_msg_id)
-            print(f"🗑️ [RZP] Deleted QR msg {qr_msg_id}")
+            logger.info(f"[RZP] Deleted QR msg {qr_msg_id}")
         except Exception as e:
-            print(f"⚠️ [RZP] Delete QR: {e}")
+            logger.warning(f"[RZP] Delete QR msg: {e}")
+
+    # Delete 'Video Limit Reached!' plan-buttons message
+    if limit_msg_id and chat_id:
+        try:
+            await _tg_app.bot.delete_message(chat_id=chat_id, message_id=limit_msg_id)
+            logger.info(f"[RZP] Deleted limit msg {limit_msg_id}")
+        except Exception as e:
+            logger.warning(f"[RZP] Delete limit msg: {e}")
 
     # Format expiry
     ist_off    = timedelta(hours=5, minutes=30)

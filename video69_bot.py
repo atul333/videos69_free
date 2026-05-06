@@ -53,6 +53,7 @@ from razorpay_payment import (
     create_payment_link,
     create_qr_code_for_plan,
     store_qr_message_id,
+    store_limit_message_id,
     start_webhook_server,
     stop_webhook_server,
     get_recent_payments,
@@ -2088,6 +2089,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode='Markdown'
             )
             await store_qr_message_id(pl_id, qr_msg.message_id)
+            # Also store the plan-selection message ID so it's deleted on payment
+            await store_limit_message_id(pl_id, query.message.message_id)
         except Exception as e:
             logger.error(f"[rzp_plan] QR photo failed: {e}")
             await context.bot.send_message(
