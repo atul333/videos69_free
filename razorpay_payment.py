@@ -18,6 +18,9 @@ from typing import Optional
 import aiohttp
 from aiohttp import web
 
+from dotenv import load_dotenv
+load_dotenv()  # MUST be here: this module is imported before main bot calls load_dotenv()
+
 # ── Config from .env ──────────────────────────────────────────────────────────
 RZP_KEY_ID         = os.getenv("RAZORPAY_KEY_ID", "")
 RZP_KEY_SECRET     = os.getenv("RAZORPAY_KEY_SECRET", "")
@@ -26,6 +29,9 @@ WEBHOOK_PORT       = int(os.getenv("WEBHOOK_PORT", "8080"))
 SHARED_DB_PATH     = os.getenv("SHARED_PREMIUM_DB", "/home/ubuntu/premium_shared.db")
 
 logger = logging.getLogger("razorpay")
+logger.info("[RZP] KEY_ID=%s  SECRET=%s",
+            'SET' if RZP_KEY_ID else 'MISSING',
+            'SET' if RZP_KEY_SECRET else 'MISSING')
 
 # Legacy single-plan env vars kept for /buy command fallback
 RZP_AMOUNT = int(os.getenv("RZP_PREMIUM_AMOUNT", "4900"))

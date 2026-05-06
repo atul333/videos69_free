@@ -75,9 +75,10 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger("video69_bot")
-logging.getLogger("httpx").setLevel(logging.WARNING)      # suppress httpx noise
-logging.getLogger("telegram").setLevel(logging.WARNING)   # suppress telegram lib noise
-logging.getLogger("apscheduler").setLevel(logging.WARNING) # suppress apscheduler noise
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)    # suppress httpcore debug spam
+logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 CHANNEL_USERNAME = os.getenv('CHANNEL_USERNAME')
