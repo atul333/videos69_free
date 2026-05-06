@@ -173,8 +173,11 @@ async def create_qr_code_for_plan(
     Returns (qr_image_url, qr_id, pl_id_for_db) or (None, None, None) on error.
     The qr_image_url is served directly by Razorpay — no external image service needed.
     """
-    if not RZP_KEY_ID or not RZP_KEY_SECRET:
-        print("⚠️ [RZP] API keys not set")
+    # Read keys at call-time (not import-time) — ensures load_dotenv() has already run
+    key_id     = os.getenv("RAZORPAY_KEY_ID", "") or RZP_KEY_ID
+    key_secret = os.getenv("RAZORPAY_KEY_SECRET", "") or RZP_KEY_SECRET
+    if not key_id or not key_secret:
+        logger.error("[RZP] API keys not set! Check RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in .env")
         return None, None, None
     plan = PLANS.get(plan_key)
     if not plan:
@@ -197,7 +200,8 @@ async def create_qr_code_for_plan(
                     "plan_name": plan_name,
                 },
             },
-            headers={"Authorization": _rzp_auth(), "Content-Type": "application/json"},
+            headers={"Authorization": "Basic " + base64.b64encode(f"{key_id}:{key_secret}".encode()).decode(),
+                     "Content-Type": "application/json"},
             timeout=aiohttp.ClientTimeout(total=20),
         ) as resp:
             data = await resp.json(content_type=None)
