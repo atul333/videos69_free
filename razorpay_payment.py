@@ -188,6 +188,49 @@ async def _get_record_by_user(user_id: int) -> Optional[dict]:
         print(f"\u26a0\ufe0f [RZP] get_record_by_user: {e}")
         return None
 
+import asyncio
+
+async def _poll_qr_payment(qr_id: str, user_id_s: str, plan_key: str, plan_name: str, amount_paise: int, session: aiohttp.ClientSession):
+    """Poll Razorpay API every 5 seconds for up to 5 minutes to detect payment instantly."""
+    key_id = os.getenv("RAZORPAY_KEY_ID", "") or RZP_KEY_ID
+    key_secret = os.getenv("RAZORPAY_KEY_SECRET", "") or RZP_KEY_SECRET
+    if not key_id or not key_secret:
+        return
+        
+    auth_header = "Basic " + base64.b64encode(f"{key_id}:{key_secret}".encode()).decode()
+    url = f"https://api.razorpay.com/v1/payments/qr_codes/{qr_id}/payments"
+    
+    # Poll for 5 minutes (60 iterations * 5 seconds)
+    for _ in range(60):
+        await asyncio.sleep(5)
+        try:
+            async with session.get(
+                url, 
+                headers={"Authorization": auth_header},
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get("count", 0) > 0:
+                        items = data.get("items", [])
+                        for pay_entity in items:
+                            if pay_entity.get("status") in ("authorized", "captured"):
+                                payment_id = pay_entity.get("id", "")
+                                contact = pay_entity.get("contact")
+                                email_ = pay_entity.get("email")
+                                ts = pay_entity.get("created_at")
+                                paid_at_str = _ts_to_str(ts)
+                                logger.info(f"[RZP] Polling detected payment {payment_id} for QR {qr_id}!")
+                                await _handle_success(
+                                    qr_id, payment_id, user_id_s, "poll.detected", 
+                                    amount_paise, contact, email_, paid_at_str, plan_key, plan_name
+                                )
+                                return # Stop polling once handled!
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            pass
+
 async def _record_paid(pl_id: str, payment_id: str):
     try:
         db = await aiosqlite.connect(SHARED_DB_PATH)
@@ -261,6 +304,10 @@ async def create_qr_code_for_plan(
             return None, None, None
         await _record_created(user_id, chat_id, qr_id, plan_key, plan_name, amount_paise, hours)
         logger.info(f"[RZP] QR code created uid={user_id} plan={plan_name} id={qr_id} image={image_url}")
+        
+        # Start background polling to grant premium instantly
+        asyncio.create_task(_poll_qr_payment(qr_id, str(user_id), plan_key, plan_name, amount_paise, session))
+        
         # Download the QR image from Razorpay CDN
         try:
             async with session.get(image_url, timeout=aiohttp.ClientTimeout(total=10)) as img_resp:
