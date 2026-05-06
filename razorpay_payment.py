@@ -318,11 +318,15 @@ async def create_payment_link(user_id, first_name, session):
 
 # ── Webhook signature ──────────────────────────────────────────────────────────
 def _verify_sig(body: bytes, sig: str) -> bool:
-    if not RZP_WEBHOOK_SECRET or RZP_WEBHOOK_SECRET == "your_webhook_secret_here":
-        print("⚠️ [RZP] Webhook secret not set — skipping sig check")
+    secret = os.getenv("RAZORPAY_WEBHOOK_SECRET", "") or RZP_WEBHOOK_SECRET
+    if not secret or secret == "your_webhook_secret_here":
+        logger.warning("[RZP] Webhook secret not set \u2014 skipping sig check")
         return True
-    expected = hmac.new(RZP_WEBHOOK_SECRET.encode(), body, __import__('hashlib').sha256).hexdigest()
-    return hmac.compare_digest(expected, sig)
+    expected = hmac.new(secret.encode(), body, __import__('hashlib').sha256).hexdigest()
+    if not hmac.compare_digest(expected, sig):
+        logger.error(f"[RZP] Signature mismatch. Expected: {expected}, Got: {sig}")
+        return False
+    return True
 
 # ── Globals injected at startup ───────────────────────────────────────────────
 _tg_app       = None
@@ -332,11 +336,18 @@ _bot_username: str = "bot"
 # ── Webhook handler ────────────────────────────────────────────────────────────
 async def _webhook_handler(request: web.Request) -> web.Response:
     body = await request.read()
-    if not _verify_sig(body, request.headers.get("X-Razorpay-Signature", "")):
+    sig_header = request.headers.get("X-Razorpay-Signature", "")
+    if not sig_header:
+        logger.error("[RZP] Missing X-Razorpay-Signature header")
+        return web.Response(status=400, text="Missing signature")
+        
+    if not _verify_sig(body, sig_header):
         return web.Response(status=400, text="Bad signature")
+        
     try:
         event = json.loads(body)
-    except Exception:
+    except Exception as e:
+        logger.error(f"[RZP] Invalid JSON body: {e}")
         return web.Response(status=400, text="Invalid JSON")
 
     ev = event.get("event", "")
