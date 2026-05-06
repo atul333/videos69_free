@@ -3,6 +3,7 @@ import random
 import json
 import subprocess
 import sys
+import logging
 import time as _time
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
@@ -47,10 +48,10 @@ from premium_sync import (
     get_total_synced_downloads_today,
 )
 
-# Import Razorpay payment integration (payment links + webhook server)
+# Import Razorpay payment integration
 from razorpay_payment import (
     create_payment_link,
-    create_payment_link_for_plan,
+    create_qr_code_for_plan,
     store_qr_message_id,
     start_webhook_server,
     stop_webhook_server,
@@ -62,6 +63,20 @@ from razorpay_payment import (
 
 # Load environment variables
 load_dotenv()
+
+# ── Logging setup ─────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[
+        logging.StreamHandler(),                        # stdout (nohup captures this)
+        logging.FileHandler("bot.log", encoding="utf-8"),  # persistent log file
+    ]
+)
+logger = logging.getLogger("video69_bot")
+logging.getLogger("httpx").setLevel(logging.WARNING)      # suppress httpx noise
+logging.getLogger("telegram").setLevel(logging.WARNING)   # suppress telegram lib noise
 
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 CHANNEL_USERNAME = os.getenv('CHANNEL_USERNAME')
@@ -2005,13 +2020,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
     elif query.data.startswith('rzp_plan_'):
-        # User tapped a payment plan button → create Razorpay link → send QR
-        plan_key  = query.data[len('rzp_plan_'):]
-        user_id   = query.from_user.id
-        chat_id   = query.message.chat_id
+        # User tapped a plan → create Razorpay QR Code → send QR image (from Razorpay CDN directly)
+        plan_key   = query.data[len('rzp_plan_'):]
+        user_id    = query.from_user.id
+        chat_id    = query.message.chat_id
         first_name = query.from_user.first_name or "there"
 
-        # Dismiss button loading spinner immediately
         try:
             await context.bot.answer_callback_query(callback_query_id=query.id)
         except Exception:
@@ -2027,64 +2041,62 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_life    = (hours >= 87600)
         days_str   = "Lifetime" if is_life else f"{hours // 24} day{'s' if hours // 24 != 1 else ''}"
 
-        # Show creating indicator
+        # Show placeholder while Razorpay creates the QR Code
         wait_msg = await context.bot.send_message(
             chat_id=chat_id,
-            text=f"⏳ Creating your *{plan_name}* payment link...\nPlease wait!",
+            text=f"⏳ Generating *{plan_name}* payment QR...\nPlease wait!",
             parse_mode='Markdown'
         )
 
         session = await _get_http_session()
-        payment_url, qr_url, pl_id = await create_payment_link_for_plan(
+        image_url, qr_id, pl_id = await create_qr_code_for_plan(
             user_id, chat_id, first_name, plan_key, session
         )
 
-        # Delete wait message
+        # Delete placeholder
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=wait_msg.message_id)
         except Exception:
             pass
 
-        if not payment_url or not pl_id:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="❌ Could not create payment link. Please try again or contact admin."
-            )
-            return
-
-        pay_btn = InlineKeyboardButton(
-            f"💳 Pay ₹{amount_inr:.0f} — {plan_name}", url=payment_url
-        )
-        try:
-            qr_msg = await context.bot.send_photo(
-                chat_id=chat_id,
-                photo=qr_url,
-                caption=(
-                    f"📱 *Scan QR or tap the button below to pay*\n\n"
-                    f"💎 *{plan_name} — ₹{amount_inr:.0f}*\n\n"
-                    f"✅ Unlimited videos for *{days_str}*\n"
-                    f"✅ *20 downloads* per day\n"
-                    f"✅ Works across *all our bots*\n\n"
-                    f"🔒 *Safe & secure* — powered by Razorpay\n\n"
-                    f"⚡ Premium activates *automatically* within seconds of payment!"
-                ),
-                parse_mode='Markdown',
-                reply_markup=InlineKeyboardMarkup([[pay_btn]])
-            )
-            # Store QR message_id so webhook can delete it after payment
-            await store_qr_message_id(pl_id, qr_msg.message_id)
-        except Exception as e:
-            print(f"⚠️ [BUY] QR send failed: {e}")
+        if not image_url or not pl_id:
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=(
-                    f"💎 *{plan_name} — ₹{amount_inr:.0f}*\n\n"
-                    f"✅ Unlimited videos for *{days_str}*\n\n"
+                    "❌ Could not generate payment QR. Please try again or contact admin.\n\n"
+                    "_If the issue persists, use_ /help _to reach support._"
+                ),
+                parse_mode='Markdown'
+            )
+            return
+
+        # Send Razorpay's own QR image (no external service — Razorpay CDN hosts it)
+        try:
+            qr_msg = await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=image_url,
+                caption=(
+                    f"💳 *Pay ₹{amount_inr:.0f} — {plan_name}*\n\n"
+                    f"1️⃣ Open GPay / PhonePe / Paytm\n"
+                    f"2️⃣ Scan the QR code above\n"
+                    f"3️⃣ Pay ₹{amount_inr:.0f}\n\n"
+                    f"⚡ Premium activates *automatically* within seconds of payment!"
+                ),
+                parse_mode='Markdown'
+            )
+            await store_qr_message_id(pl_id, qr_msg.message_id)
+        except Exception as e:
+            logger.error(f"[rzp_plan] QR photo failed: {e}")
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"💳 *{plan_name} — ₹{amount_inr:.0f}*\n"
+                    f"QR ID: `{qr_id}`\n\n"
                     f"⚡ Premium activates automatically after payment!"
                 ),
-                parse_mode='Markdown',
-                reply_markup=InlineKeyboardMarkup([[pay_btn]])
+                parse_mode='Markdown'
             )
+
 
     elif query.data.startswith('vote_'):
         # Format: vote_like_{message_id} or vote_dislike_{message_id} or vote_none_{message_id}

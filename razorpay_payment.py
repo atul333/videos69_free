@@ -29,21 +29,21 @@ RZP_AMOUNT = int(os.getenv("RZP_PREMIUM_AMOUNT", "4900"))
 RZP_HOURS  = int(os.getenv("RZP_PREMIUM_HOURS",  "720"))
 
 # ── Plans catalogue ───────────────────────────────────────────────────────────
+# Unicode U+0336 = COMBINING LONG STROKE OVERLAY (strikethrough on prev char)
 # key → (button_label, hours, amount_paise, plan_name, rzp_description)
 PLANS: dict[str, tuple] = {
-    "1d":       ("⚡ 1 Day 🔒 Unlimited Videos — ₹1",  24,    100,  "1 Day Premium",    "Videos Bot — 1 Day Unlimited"),
-    "3d":       ("🔥 3 Days — ₹3 ₹2 [33% OFF]",        72,    200,  "3 Day Premium",    "Videos Bot — 3 Days Unlimited"),
-    "5d":       ("💎 5 Days — ₹5 ₹3 [40% OFF]",        120,   300,  "5 Day Premium",    "Videos Bot — 5 Days Unlimited"),
-    "10d":      ("👑 10 Days — ₹10 ₹5 [50% OFF]",      240,   500,  "10 Day Premium",   "Videos Bot — 10 Days Unlimited"),
-    "lifetime": ("🎫 Lifetime Premium — ₹99 [LIFETIME]",87600, 9900, "Lifetime Premium", "Videos Bot — Lifetime Unlimited"),
+    "1d":       ("\u26a1 1 Day \U0001f512 Unlimited Videos \u2014 \u20b91",         24,    100,  "1 Day Premium",    "Videos Bot \u2014 1 Day Unlimited"),
+    "3d":       ("\U0001f525 3 Days \u2014 \u20b9\u03363\u0336 \u20b92 [33% OFF]",  72,    200,  "3 Day Premium",    "Videos Bot \u2014 3 Days Unlimited"),
+    "5d":       ("\U0001f4a0 5 Days \u2014 \u20b9\u03365\u0336 \u20b93 [40% OFF]",  120,   300,  "5 Day Premium",    "Videos Bot \u2014 5 Days Unlimited"),
+    "10d":      ("\U0001f451 10 Days \u2014 \u20b9\u03361\u03360\u0336 \u20b95 [50% OFF]", 240, 500, "10 Day Premium", "Videos Bot \u2014 10 Days Unlimited"),
+    "lifetime": ("\U0001f39f\ufe0f Lifetime Premium \u2014 \u20b999 [LIFETIME]", 87600, 9900, "Lifetime Premium", "Videos Bot \u2014 Lifetime Unlimited"),
 }
 
-RZP_PL_URL = "https://api.razorpay.com/v1/payment_links"
+
+RZP_PL_URL    = "https://api.razorpay.com/v1/payment_links"
+RZP_QR_URL    = "https://api.razorpay.com/v1/payments/qr-codes"  # Razorpay QR Codes API
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-def _qr_image_url(data: str) -> str:
-    return f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={quote(data)}"
-
 def _rzp_auth() -> str:
     return "Basic " + base64.b64encode(f"{RZP_KEY_ID}:{RZP_KEY_SECRET}".encode()).decode()
 
@@ -155,11 +155,15 @@ async def _record_paid(pl_id: str, payment_id: str):
         print(f"⚠️ [RZP] record_paid: {e}")
 
 # ── Create payment link ───────────────────────────────────────────────────────
-async def create_payment_link_for_plan(
+async def create_qr_code_for_plan(
     user_id: int, chat_id: int, first_name: str,
     plan_key: str, session: aiohttp.ClientSession,
 ) -> tuple[Optional[str], Optional[str], Optional[str]]:
-    """Returns (payment_url, qr_image_url, pl_id) or (None,None,None) on error."""
+    """
+    Create a Razorpay QR Code for the given plan using /v1/payments/qr-codes.
+    Returns (qr_image_url, qr_id, pl_id_for_db) or (None, None, None) on error.
+    The qr_image_url is served directly by Razorpay — no external image service needed.
+    """
     if not RZP_KEY_ID or not RZP_KEY_SECRET:
         print("⚠️ [RZP] API keys not set")
         return None, None, None
@@ -169,36 +173,59 @@ async def create_payment_link_for_plan(
     _, hours, amount_paise, plan_name, description = plan
     try:
         async with session.post(
-            RZP_PL_URL,
+            RZP_QR_URL,
             json={
-                "amount": amount_paise, "currency": "INR",
-                "accept_partial": False, "description": description,
-                "notes": {"user_id": str(user_id), "first_name": first_name,
-                          "plan_key": plan_key, "plan_name": plan_name},
-                "notify": {"sms": False, "email": False}, "reminder_enable": False,
+                "type": "upi_qr",
+                "name": plan_name,
+                "usage": "single_use",
+                "fixed_amount": True,
+                "payment_amount": amount_paise,
+                "description": description,
+                "notes": {
+                    "user_id":   str(user_id),
+                    "first_name": first_name,
+                    "plan_key":  plan_key,
+                    "plan_name": plan_name,
+                },
             },
             headers={"Authorization": _rzp_auth(), "Content-Type": "application/json"},
-            timeout=aiohttp.ClientTimeout(total=15),
+            timeout=aiohttp.ClientTimeout(total=20),
         ) as resp:
             data = await resp.json(content_type=None)
         if resp.status not in (200, 201):
-            print(f"❌ [RZP] link creation HTTP {resp.status}: {data}")
+            print(f"❌ [RZP] QR code creation HTTP {resp.status}: {data}")
             return None, None, None
-        pl_id  = data.get("id", "")
-        pl_url = data.get("short_url") or data.get("url", "")
-        if not pl_url or not pl_id:
+        qr_id     = data.get("id", "")
+        image_url = data.get("image_url", "")
+        if not qr_id or not image_url:
+            print(f"❌ [RZP] Missing id/image_url in QR response: {data}")
             return None, None, None
-        await _record_created(user_id, chat_id, pl_id, plan_key, plan_name, amount_paise, hours)
-        print(f"✅ [RZP] {plan_name} link uid={user_id}: {pl_url}")
-        return pl_url, _qr_image_url(pl_url), pl_id
+        # Use qr_id as our pl_id in the DB
+        await _record_created(user_id, chat_id, qr_id, plan_key, plan_name, amount_paise, hours)
+        print(f"✅ [RZP] QR code created uid={user_id} plan={plan_name} id={qr_id}")
+        return image_url, qr_id, qr_id
     except Exception as e:
-        print(f"❌ [RZP] create_link exception: {e}")
+        print(f"❌ [RZP] create_qr_code exception: {e}")
         return None, None, None
 
-# Legacy wrapper used by /buy command
+
+# Legacy wrapper kept for /buy command
+async def create_payment_link_for_plan(
+    user_id: int, chat_id: int, first_name: str,
+    plan_key: str, session: aiohttp.ClientSession,
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Delegates to create_qr_code_for_plan (Razorpay QR Codes API)."""
+    image_url, qr_id, pl_id = await create_qr_code_for_plan(
+        user_id, chat_id, first_name, plan_key, session
+    )
+    return image_url, image_url, pl_id   # (payment_url=image, qr_url=image, pl_id)
+
+
 async def create_payment_link(user_id, first_name, session):
-    url, qr, _ = await create_payment_link_for_plan(user_id, user_id, first_name, "1d", session)
-    return url, qr
+    """Legacy /buy — creates 1-day QR."""
+    url, _, _ = await create_qr_code_for_plan(user_id, user_id, first_name, "1d", session)
+    return url, url
+
 
 # ── Webhook signature ──────────────────────────────────────────────────────────
 def _verify_sig(body: bytes, sig: str) -> bool:
@@ -235,19 +262,43 @@ async def _webhook_handler(request: web.Request) -> web.Response:
         contact     = pay_entity.get("contact")
         email_      = pay_entity.get("email")
         ts          = pay_entity.get("created_at")
-        paid_at_str = "Unknown"
-        if ts:
-            try:
-                paid_at_str = datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-            except Exception:
-                pass
+        paid_at_str = _ts_to_str(ts)
         notes      = pl_entity.get("notes") or pay_entity.get("notes") or {}
         user_id_s  = str(notes.get("user_id", ""))
         plan_key   = notes.get("plan_key", "1d")
         plan_name  = notes.get("plan_name", "Premium")
         await _handle_success(pl_id, payment_id, user_id_s, ev,
                               amount_paid, contact, email_, paid_at_str, plan_key, plan_name)
+
+    # Razorpay QR Code payment event
+    elif ev == "qr_code.credited":
+        qr_entity  = event.get("payload", {}).get("qr_code",  {}).get("entity", {})
+        pay_entity = event.get("payload", {}).get("payment",  {}).get("entity", {})
+        qr_id      = qr_entity.get("id", "")
+        payment_id = pay_entity.get("id", "")
+        amount_paid = pay_entity.get("amount", 0)
+        contact     = pay_entity.get("contact")
+        email_      = pay_entity.get("email")
+        ts          = pay_entity.get("created_at")
+        paid_at_str = _ts_to_str(ts)
+        notes       = qr_entity.get("notes") or {}
+        user_id_s   = str(notes.get("user_id", ""))
+        plan_key    = notes.get("plan_key", "1d")
+        plan_name   = notes.get("plan_name", "Premium")
+        # qr_id is stored as pl_id in our DB
+        await _handle_success(qr_id, payment_id, user_id_s, ev,
+                              amount_paid, contact, email_, paid_at_str, plan_key, plan_name)
+
     return web.Response(status=200, text="ok")
+
+
+def _ts_to_str(ts) -> str:
+    if ts:
+        try:
+            return datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        except Exception:
+            pass
+    return "Unknown"
 
 
 async def _handle_success(pl_id, payment_id, user_id_s, event_name,
