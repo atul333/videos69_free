@@ -283,6 +283,7 @@ async def create_qr_code_for_plan(
                     "first_name": first_name,
                     "plan_key":   plan_key,
                     "plan_name":  plan_name,
+                    "bot_token":  _tg_app.bot.token if _tg_app else ""
                 },
             },
             headers={"Authorization": "Basic " + base64.b64encode(f"{key_id}:{key_secret}".encode()).decode(),
@@ -414,8 +415,10 @@ async def _webhook_handler(request: web.Request) -> web.Response:
         user_id_s  = str(notes.get("user_id", ""))
         plan_key   = notes.get("plan_key", "1d")
         plan_name  = notes.get("plan_name", "Premium")
+        target_bot_token = notes.get("bot_token")
         await _handle_success(pl_id, payment_id, user_id_s, ev,
-                              amount_paid, contact, email_, paid_at_str, plan_key, plan_name)
+                              amount_paid, contact, email_, paid_at_str, plan_key, plan_name,
+                              target_bot_token)
 
     # Razorpay QR Code payment event
     elif ev == "qr_code.credited":
@@ -432,9 +435,11 @@ async def _webhook_handler(request: web.Request) -> web.Response:
         user_id_s   = str(notes.get("user_id", ""))
         plan_key    = notes.get("plan_key", "1d")
         plan_name   = notes.get("plan_name", "Premium")
+        target_bot_token = notes.get("bot_token")
         # qr_id is stored as pl_id in our DB
         await _handle_success(qr_id, payment_id, user_id_s, ev,
-                              amount_paid, contact, email_, paid_at_str, plan_key, plan_name)
+                              amount_paid, contact, email_, paid_at_str, plan_key, plan_name,
+                              target_bot_token)
 
     return web.Response(status=200, text="ok")
 
@@ -449,7 +454,8 @@ def _ts_to_str(ts) -> str:
 
 
 async def _handle_success(pl_id, payment_id, user_id_s, event_name,
-                           amount_paid, contact, email_, paid_at_str, plan_key, plan_name):
+                           amount_paid, contact, email_, paid_at_str, plan_key, plan_name,
+                           target_bot_token=None):
     global _processed_payments
     # Fast in-memory dedup — catches simultaneous duplicate webhook events before DB hit
     dedup_key = payment_id or pl_id
@@ -514,86 +520,99 @@ async def _handle_success(pl_id, payment_id, user_id_s, event_name,
         logger.error(f"[RZP] grant_premium_synced: {e}")
         return
 
-    # Mark paid IMMEDIATELY — before sending Telegram messages to prevent race-condition dupes
+    # Mark paid IMMEDIATELY \u2014 before sending Telegram messages to prevent race-condition dupes
     if pl_id:
         await _record_paid(pl_id, payment_id)
 
-    if _tg_app is None:
+    actual_token = target_bot_token or (_tg_app.bot.token if _tg_app else None)
+    if not actual_token:
+        logger.warning("[RZP] No bot token available to send confirmation message.")
         return
 
-    # Delete QR photo message
-    if qr_msg_id and chat_id:
+    async with aiohttp.ClientSession() as session:
+        # Delete QR photo message
+        if qr_msg_id and chat_id:
+            try:
+                await session.post(
+                    f"https://api.telegram.org/bot{actual_token}/deleteMessage",
+                    json={"chat_id": chat_id, "message_id": qr_msg_id}
+                )
+                logger.info(f"[RZP] Deleted QR msg {qr_msg_id} via API")
+            except Exception as e:
+                logger.warning(f"[RZP] Delete QR msg: {e}")
+
+        # Delete 'Video Limit Reached!' plan-buttons message
+        if limit_msg_id and chat_id:
+            try:
+                await session.post(
+                    f"https://api.telegram.org/bot{actual_token}/deleteMessage",
+                    json={"chat_id": chat_id, "message_id": limit_msg_id}
+                )
+                logger.info(f"[RZP] Deleted limit msg {limit_msg_id} via API")
+            except Exception as e:
+                logger.warning(f"[RZP] Delete limit msg: {e}")
+
+        # Format expiry
+        ist_off    = timedelta(hours=5, minutes=30)
+        expiry_ist = premium_until + ist_off
+        expiry_str = expiry_ist.strftime("%d %b %Y, %I:%M %p IST")
+
+        # \u2500\u2500 User message \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
         try:
-            await _tg_app.bot.delete_message(chat_id=chat_id, message_id=qr_msg_id)
-            logger.info(f"[RZP] Deleted QR msg {qr_msg_id}")
-        except Exception as e:
-            logger.warning(f"[RZP] Delete QR msg: {e}")
-
-    # Delete 'Video Limit Reached!' plan-buttons message
-    if limit_msg_id and chat_id:
-        try:
-            await _tg_app.bot.delete_message(chat_id=chat_id, message_id=limit_msg_id)
-            logger.info(f"[RZP] Deleted limit msg {limit_msg_id}")
-        except Exception as e:
-            logger.warning(f"[RZP] Delete limit msg: {e}")
-
-    # Format expiry
-    ist_off    = timedelta(hours=5, minutes=30)
-    expiry_ist = premium_until + ist_off
-    expiry_str = expiry_ist.strftime("%d %b %Y, %I:%M %p IST")
-
-    # ── User message (exact format) ───────────────────────────────────────────
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-    try:
-        await _tg_app.bot.send_message(
-            chat_id=chat_id,
-            text=(
-                f"🎉 *Premium Activated!*\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"📦 Plan        : {plan_name}\n"
-                f"⏰ Duration    : {dur_str}\n"
-                f"💰 Amount Paid : ₹{amt_inr:.0f}\n"
-                f"📅 Valid Till  : {expiry_str}\n\n"
-                f"🆔 Payment ID  : `{payment_id}`\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"🎫 You now have unlimited access!"
-            ),
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🎫 Get Video", callback_data="next_video")]]
-            ),
-        )
-    except Exception as e:
-        print(f"⚠️ [RZP] User notify: {e}")
-
-    # ── Admin message ──────────────────────────────────────────────────────────
-    # Fallback: read from env if _admin_uid wasn't set by start_webhook_server
-    admin_id = _admin_uid or int(os.getenv("ADMIN_USER_ID", "0"))
-    logger.info(f"[RZP] Admin notify → admin_id={admin_id} _admin_uid={_admin_uid}")
-    if admin_id:
-        try:
-            days_val = days if days is not None else "∞"
-            await _tg_app.bot.send_message(
-                chat_id=admin_id,
-                text=(
-                    f"<b>💰 Payment Received via Razorpay!</b>\n\n"
-                    f"🤖 Bot: @{_bot_username}\n"
-                    f"👤 User: <code>{user_id}</code>\n"
-                    f"⚡️ Plan: {plan_name}\n"
-                    f"💰 Amount: ₹{amt_inr:.0f}\n"
-                    f"🆔 Payment ID: <code>{payment_id}</code>\n"
-                    f"📞 Contact: {contact or 'None'}\n"
-                    f"📧 Email: {email_ or 'None'}\n"
-                    f"📅 Paid: {paid_at_str}\n"
-                    f"🔔 Event: <code>{event_name}</code>\n\n"
-                    f"<b>✅ PREMIUM AUTO-GRANTED</b>\n"
-                    f"Valid till: {expiry_str}"
-                ),
-                parse_mode="HTML",
+            user_text = (
+                f"\U0001f389 *Premium Activated!*\n\n"
+                f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+                f"\U0001f4e6 Plan        : {plan_name}\n"
+                f"\u23f0 Duration    : {dur_str}\n"
+                f"\U0001f4b0 Amount Paid : \u20b9{amt_inr:.0f}\n"
+                f"\U0001f4c5 Valid Till  : {expiry_str}\n\n"
+                f"\U0001f194 Payment ID  : `{payment_id}`\n"
+                f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\n"
+                f"\U0001f3ab You now have unlimited access!"
             )
-            logger.info(f"[RZP] Admin notified uid={user_id} plan={plan_name}")
+            await session.post(
+                f"https://api.telegram.org/bot{actual_token}/sendMessage",
+                json={
+                    "chat_id": chat_id,
+                    "text": user_text,
+                    "parse_mode": "Markdown",
+                    "reply_markup": {
+                        "inline_keyboard": [[{"text": "\U0001f3ab Get Video", "callback_data": "next_video"}]]
+                    }
+                }
+            )
         except Exception as e:
-            logger.error(f"[RZP] Admin notify FAILED: {e}")
+            logger.error(f"[RZP] User notify: {e}")
+
+        # \u2500\u2500 Admin message \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        admin_id = _admin_uid or int(os.getenv("ADMIN_USER_ID", "0"))
+        logger.info(f"[RZP] Admin notify \u2192 admin_id={admin_id} _admin_uid={_admin_uid}")
+        if admin_id:
+            try:
+                days_val = days if days is not None else "\u221e"
+                await session.post(
+                    f"https://api.telegram.org/bot{actual_token}/sendMessage",
+                    json={
+                        "chat_id": admin_id,
+                        "text": (
+                            f"<b>\U0001f4b0 Payment Received via Razorpay!</b>\n\n"
+                            f"\U0001f464 User: <code>{user_id}</code>\n"
+                            f"\u26a1\ufe0f Plan: {plan_name}\n"
+                            f"\U0001f4b0 Amount: \u20b9{amt_inr:.0f}\n"
+                            f"\U0001f194 Payment ID: <code>{payment_id}</code>\n"
+                            f"\U0001f4de Contact: {contact or 'None'}\n"
+                            f"\U0001f4e7 Email: {email_ or 'None'}\n"
+                            f"\U0001f4c5 Paid: {paid_at_str}\n"
+                            f"\U0001f514 Event: <code>{event_name}</code>\n\n"
+                            f"<b>\u2705 PREMIUM AUTO-GRANTED</b>\n"
+                            f"Valid till: {expiry_str}"
+                        ),
+                        "parse_mode": "HTML"
+                    }
+                )
+                logger.info(f"[RZP] Admin notified uid={user_id} plan={plan_name}")
+            except Exception as e:
+                logger.error(f"[RZP] Admin notify FAILED: {e}")
 
 
 # ── Webhook server ─────────────────────────────────────────────────────────────
