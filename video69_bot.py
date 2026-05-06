@@ -1573,6 +1573,63 @@ async def admin_payments_command(update: Update, context: ContextTypes.DEFAULT_T
     )
 
 
+async def admin_revoke_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin /revoke <user_id> — revoke a user's premium across ALL bots."""
+    if not _is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ You are not authorized to use this command.")
+        return
+
+    if not context.args or len(context.args) < 1:
+        await update.message.reply_text(
+            "⚠️ *Usage:* `/revoke <user_id>`\n\n"
+            "*Example:* `/revoke 7708376300`\n\n"
+            "This will immediately remove their premium access from ALL bots.",
+            parse_mode='Markdown'
+        )
+        return
+
+    try:
+        target_uid = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID. Must be a number.")
+        return
+
+    # Revoke from shared DB (all bots see this within cache TTL ≤60s)
+    await revoke_premium_synced(target_uid)
+
+    # Also clear from local user_states if this bot has them
+    if target_uid in user_states:
+        user_states[target_uid]['premium_until'] = None
+        save_user_states(user_states, _hint_uid=target_uid)
+
+    # Invalidate premium cache so next check fetches fresh from DB
+    _invalidate_premium_cache(target_uid)
+
+    await update.message.reply_text(
+        f"✅ *Premium Revoked!*\n\n"
+        f"👤 User ID: `{target_uid}`\n"
+        f"🗑️ Premium access removed from *all bots* immediately.\n\n"
+        f"User will see free-tier limits on their next request.",
+        parse_mode='Markdown'
+    )
+
+    # Optionally notify the user
+    try:
+        await context.bot.send_message(
+            chat_id=target_uid,
+            text=(
+                "❌ *Your premium access has been revoked.*\n\n"
+                "If you believe this is a mistake, please contact the admin.\n"
+                "You can still use the bot with the free daily limit."
+            ),
+            parse_mode='Markdown'
+        )
+    except Exception:
+        pass  # User may have blocked the bot
+
+    print(f"🗑️ [REVOKE] Admin revoked premium for uid={target_uid}")
+
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /help command - Direct users to admin bot"""
     user = update.effective_user
@@ -2776,6 +2833,7 @@ def main():
         application.add_handler(CommandHandler("videolikes", admin_video_likes_command))
         application.add_handler(CommandHandler("adminhelp", admin_help_command))
         application.add_handler(CommandHandler("payments", admin_payments_command))
+        application.add_handler(CommandHandler("revoke", admin_revoke_command))
 
         # Broadcast ConversationHandler in group=-1 (highest priority).
         # MUST be group=-1, not group=0. Reason:
