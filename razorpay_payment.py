@@ -188,6 +188,7 @@ async def _get_record_by_user(user_id: int) -> Optional[dict]:
         print(f"\u26a0\ufe0f [RZP] get_record_by_user: {e}")
         return None
 
+async def _record_paid(pl_id: str, payment_id: str):
     try:
         db = await aiosqlite.connect(SHARED_DB_PATH)
         await db.execute("PRAGMA journal_mode=WAL")
