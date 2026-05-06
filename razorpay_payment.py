@@ -478,16 +478,19 @@ async def _handle_success(pl_id, payment_id, user_id_s, event_name,
     except Exception as e:
         print(f"⚠️ [RZP] User notify: {e}")
 
-    # ── Admin message (exact format) ──────────────────────────────────────────
-    if _admin_uid:
+    # ── Admin message ──────────────────────────────────────────────────────────
+    # Fallback: read from env if _admin_uid wasn't set by start_webhook_server
+    admin_id = _admin_uid or int(os.getenv("ADMIN_USER_ID", "0"))
+    logger.info(f"[RZP] Admin notify → admin_id={admin_id} _admin_uid={_admin_uid}")
+    if admin_id:
         try:
-            days_val = days if days else "∞"
+            days_val = days if days is not None else "∞"
             await _tg_app.bot.send_message(
-                chat_id=_admin_uid,
+                chat_id=admin_id,
                 text=(
                     f"💰 *Payment Received via Razorpay!*\n\n"
                     f"🤖 Bot: @{_bot_username}\n"
-                    f"👤 User: ID `{user_id}` (from payment link notes)\n"
+                    f"👤 User: ID `{user_id}`\n"
                     f"⚡️ Plan: {plan_name}\n"
                     f"💰 Amount: ₹{amt_inr:.0f}\n"
                     f"🆔 Payment ID: `{payment_id}`\n"
@@ -495,17 +498,21 @@ async def _handle_success(pl_id, payment_id, user_id_s, event_name,
                     f"📧 Email: {email_ or 'None'}\n"
                     f"📅 Paid: {paid_at_str}\n"
                     f"🔔 Event: `{event_name}`\n\n"
-                    f"✅ *APPROVE COMMAND:*\n"
-                    f"`/approve {user_id} {days_val} {payment_id}`"
+                    f"✅ *PREMIUM AUTO-GRANTED* ✅\n"
+                    f"Valid till: {expiry_str}"
                 ),
                 parse_mode="Markdown",
             )
+            logger.info(f"[RZP] Admin notified uid={user_id} plan={plan_name}")
         except Exception as e:
-            print(f"⚠️ [RZP] Admin notify: {e}")
+            logger.error(f"[RZP] Admin notify FAILED: {e}")
 
 
 # ── Webhook server ─────────────────────────────────────────────────────────────
 _webhook_runner: Optional[web.AppRunner] = None
+_tg_app      = None   # set by start_webhook_server()
+_admin_uid   = None   # set by start_webhook_server()
+_bot_username = ""    # set by start_webhook_server()
 
 
 async def start_webhook_server(tg_application, admin_user_id: int, bot_username: str) -> bool:
