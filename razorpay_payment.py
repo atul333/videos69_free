@@ -10,6 +10,7 @@ Flow:
 """
 
 import os, json, hmac, hashlib, base64, aiosqlite
+import logging
 from datetime import datetime, timezone, timedelta
 from urllib.parse import quote
 from typing import Optional
@@ -23,6 +24,8 @@ RZP_KEY_SECRET     = os.getenv("RAZORPAY_KEY_SECRET", "")
 RZP_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET", "")
 WEBHOOK_PORT       = int(os.getenv("WEBHOOK_PORT", "8080"))
 SHARED_DB_PATH     = os.getenv("SHARED_PREMIUM_DB", "/home/ubuntu/premium_shared.db")
+
+logger = logging.getLogger("razorpay")
 
 # Legacy single-plan env vars kept for /buy command fallback
 RZP_AMOUNT = int(os.getenv("RZP_PREMIUM_AMOUNT", "4900"))
@@ -193,19 +196,23 @@ async def create_qr_code_for_plan(
         ) as resp:
             data = await resp.json(content_type=None)
         if resp.status not in (200, 201):
-            print(f"❌ [RZP] QR code creation HTTP {resp.status}: {data}")
+            logger.error(
+                f"[RZP] QR code creation FAILED — HTTP {resp.status}\n"
+                f"  Request: plan={plan_key} uid={user_id} amount={amount_paise}p\n"
+                f"  Razorpay response: {json.dumps(data, ensure_ascii=False)}"
+            )
             return None, None, None
         qr_id     = data.get("id", "")
         image_url = data.get("image_url", "")
         if not qr_id or not image_url:
-            print(f"❌ [RZP] Missing id/image_url in QR response: {data}")
+            logger.error(f"[RZP] Missing id/image_url in QR response: {data}")
             return None, None, None
         # Use qr_id as our pl_id in the DB
         await _record_created(user_id, chat_id, qr_id, plan_key, plan_name, amount_paise, hours)
-        print(f"✅ [RZP] QR code created uid={user_id} plan={plan_name} id={qr_id}")
+        logger.info(f"[RZP] QR code created uid={user_id} plan={plan_name} id={qr_id}")
         return image_url, qr_id, qr_id
     except Exception as e:
-        print(f"❌ [RZP] create_qr_code exception: {e}")
+        logger.exception(f"[RZP] create_qr_code exception for uid={user_id} plan={plan_key}: {e}")
         return None, None, None
 
 

@@ -66,17 +66,18 @@ load_dotenv()
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,          # DEBUG captures INFO + WARNING + ERROR + CRITICAL
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
-        logging.StreamHandler(),                        # stdout (nohup captures this)
-        logging.FileHandler("bot.log", encoding="utf-8"),  # persistent log file
+        logging.StreamHandler(),
+        logging.FileHandler("bot.log", encoding="utf-8"),
     ]
 )
 logger = logging.getLogger("video69_bot")
 logging.getLogger("httpx").setLevel(logging.WARNING)      # suppress httpx noise
 logging.getLogger("telegram").setLevel(logging.WARNING)   # suppress telegram lib noise
+logging.getLogger("apscheduler").setLevel(logging.WARNING) # suppress apscheduler noise
 
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 CHANNEL_USERNAME = os.getenv('CHANNEL_USERNAME')
