@@ -47,6 +47,19 @@ from premium_sync import (
     get_total_synced_downloads_today,
 )
 
+# Import Razorpay payment integration (payment links + webhook server)
+from razorpay_payment import (
+    create_payment_link,
+    create_payment_link_for_plan,
+    store_qr_message_id,
+    start_webhook_server,
+    stop_webhook_server,
+    get_recent_payments,
+    PLANS as RZP_PLANS,
+    RZP_HOURS,
+    RZP_AMOUNT,
+)
+
 # Load environment variables
 load_dotenv()
 
@@ -1086,30 +1099,22 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                         time_msg = f"{hours_until_reset} hour(s) and {minutes_until_reset % 60} minute(s)"
                     else:
                         time_msg = f"{minutes_until_reset} minute(s)"
-                    # Generate shortened links from BOTH services concurrently
+                    # Build plan + ad keyboard
                     aro_url, vp_url = await create_shortened_links(user_id)
-                    keyboard = []
+                    keyboard = [[InlineKeyboardButton(lbl, callback_data=f'rzp_plan_{k}')]
+                                for k, (lbl, *_) in RZP_PLANS.items()]
                     if aro_url:
                         keyboard.append([InlineKeyboardButton("🔥 AroLinks — Watch Ad & Get Premium", url=aro_url)])
                     if vp_url:
                         keyboard.append([InlineKeyboardButton("⚡ VPLink — Watch Ad & Get Premium", url=vp_url)])
-                    if not keyboard:
-                        keyboard = [[InlineKeyboardButton("🔥▶️ Watch Ad → Get FREE Premium! 🎁", callback_data='watch_ad')]]
+                    if not aro_url and not vp_url:
+                        keyboard.append([InlineKeyboardButton("🔥▶️ Watch Ad → Get FREE Premium! 🎁", callback_data='watch_ad')])
                     reply_markup = InlineKeyboardMarkup(keyboard)
                     await context.bot.send_message(
                         chat_id=chat_id,
-                        text=f"⏰ **Premium Access Expired!**\n\n"
-                             f"Your 12-hour premium has ended. To keep watching unlimited videos, you need to watch **1 short ad**.\n\n"
-                             f"━━━━━━━━━━━━━━━━━━━━\n"
-                             f"🎯 **HOW TO UNLOCK PREMIUM:**\n"
-                             f"━━━━━━━━━━━━━━━━━━━━\n"
-                             f"🔥 **Tap the button below** to watch the ad\n"
-                             f"✅ **Premium unlocks instantly** after watching!\n\n"
-                             f"🎁 **What you get:**\n"
-                             f"• 🔓 Unlimited videos for **12 hours**\n"
-                             f"• 📥 **20 downloads** (instead of 1)\n\n"
-                             f"⏳ Or wait **{time_msg}** to get **1 free video** again at midnight.\n\n"
-                             f"⬇️ One tap → Instant premium access:",
+                        text=f"🚫 **Video Limit Reached!**\n\n"
+                             f"You've used your free video. Buy a plan or watch an ad to continue watching ⬇️\n\n"
+                             f"⏳ Next free video in: **{time_msg}**",
                         parse_mode='Markdown',
                         reply_markup=reply_markup
                     )
@@ -1127,30 +1132,22 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 time_msg = f"{hours_until_reset} hour(s) and {minutes_until_reset % 60} minute(s)"
             else:
                 time_msg = f"{minutes_until_reset} minute(s)"
-            # Generate shortened links from BOTH services concurrently
+            # Build plan + ad keyboard
             aro_url, vp_url = await create_shortened_links(user_id)
-            keyboard = []
+            keyboard = [[InlineKeyboardButton(lbl, callback_data=f'rzp_plan_{k}')]
+                        for k, (lbl, *_) in RZP_PLANS.items()]
             if aro_url:
                 keyboard.append([InlineKeyboardButton("🔥 AroLinks — Watch Ad & Get Premium", url=aro_url)])
             if vp_url:
                 keyboard.append([InlineKeyboardButton("⚡ VPLink — Watch Ad & Get Premium", url=vp_url)])
-            if not keyboard:
-                keyboard = [[InlineKeyboardButton("🔥▶️ Watch Ad → Get FREE Premium! 🎁", callback_data='watch_ad')]]
+            if not aro_url and not vp_url:
+                keyboard.append([InlineKeyboardButton("🔥▶️ Watch Ad → Get FREE Premium! 🎁", callback_data='watch_ad')])
             reply_markup = InlineKeyboardMarkup(keyboard)
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"🚫 **You've Watched Your 1 Free Video!**\n\n"
-                     f"To continue watching, you must **watch 1 short ad** to unlock Premium Access.\n\n"
-                     f"━━━━━━━━━━━━━━━━━━━━\n"
-                     f"🎯 **HOW TO UNLOCK PREMIUM:**\n"
-                     f"━━━━━━━━━━━━━━━━━━━━\n"
-                     f"🔥 **Tap the button below** to watch the ad\n"
-                     f"✅ **Premium unlocks instantly** after watching!\n\n"
-                     f"🎁 **What you get:**\n"
-                     f"• 🔓 Unlimited videos for **12 hours**\n"
-                     f"• 📥 **20 downloads** (instead of 1)\n\n"
-                     f"⏳ Or wait **{time_msg}** to get **1 free video** again at midnight.\n\n"
-                     f"⬇️ One tap → Instant premium access:",
+                text=f"🚫 **Video Limit Reached!**\n\n"
+                     f"You've used your free video. Buy a plan or watch an ad to continue watching ⬇️\n\n"
+                     f"⏳ Next free video in: **{time_msg}**",
                 parse_mode='Markdown',
                 reply_markup=reply_markup
             )
@@ -1456,6 +1453,124 @@ Enjoy! 🍿
         reply_markup=InlineKeyboardMarkup(inline_keyboard)
     )
 
+
+
+async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /buy — create a Razorpay payment link + QR code for premium subscription."""
+    user = update.effective_user
+    user_id = user.id
+    first_name = user.first_name or "there"
+
+    # Check if already premium
+    if await is_premium_user_async(user_id):
+        premium_until = await get_premium_until_synced(user_id) or user_states.get(user_id, {}).get('premium_until')
+        if premium_until:
+            expiry_ist = utc_to_ist(premium_until)
+            time_remaining = premium_until - _now_utc()
+            days_rem = int(time_remaining.total_seconds() / 86400)
+            hrs_rem  = int((time_remaining.total_seconds() % 86400) / 3600)
+            await update.message.reply_text(
+                f"✅ *You already have Premium Access!*\n\n"
+                f"⏰ Expires: *{expiry_ist.strftime('%d %b %Y, %I:%M %p')} IST*\n"
+                f"⏳ Remaining: *{days_rem}d {hrs_rem}h*\n\n"
+                f"No need to pay again — enjoy unlimited videos! 🍿",
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("🎬 Watch Now", callback_data='next_video')]]
+                )
+            )
+            return
+
+    days = RZP_HOURS // 24
+    amount_inr = RZP_AMOUNT / 100
+
+    # Send "creating link…" placeholder so user knows something is happening
+    wait_msg = await update.message.reply_text(
+        f"⏳ Creating your payment link...\n"
+        f"Please wait a moment!"
+    )
+
+    session = await _get_http_session()
+    payment_url, qr_url = await create_payment_link(user_id, first_name, session)
+
+    # Delete the placeholder
+    try:
+        await context.bot.delete_message(
+            chat_id=update.effective_chat.id,
+            message_id=wait_msg.message_id
+        )
+    except Exception:
+        pass
+
+    if not payment_url:
+        await update.message.reply_text(
+            "❌ Could not create payment link right now.\n"
+            "Please try again in a minute or contact admin."
+        )
+        return
+
+    keyboard = [
+        [InlineKeyboardButton(f"💳 Pay ₹{amount_inr:.0f} — Get {days}-Day Premium", url=payment_url)],
+        [InlineKeyboardButton("💬 Need Help?", url="https://t.me/videos69Admin_Bot")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # Send QR code image first
+    try:
+        await context.bot.send_photo(
+            chat_id=update.effective_chat.id,
+            photo=qr_url,
+            caption=(
+                f"📱 *Scan QR or tap the button below to pay*\n\n"
+                f"💎 *{days}-Day Premium Plan — ₹{amount_inr:.0f}*\n\n"
+                f"✅ Unlimited videos for *{days} days*\n"
+                f"✅ *20 downloads* per day\n"
+                f"✅ Works across *all our bots*\n\n"
+                f"🔒 *Safe & secure* — powered by Razorpay\n\n"
+                f"⚡ Premium activates *automatically* within seconds of payment!"
+            ),
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
+    except Exception as e:
+        print(f"⚠️ [BUY] Could not send QR photo: {e} — sending text fallback")
+        await update.message.reply_text(
+            f"💎 *{days}-Day Premium — ₹{amount_inr:.0f}*\n\n"
+            f"✅ Unlimited videos for *{days} days*\n"
+            f"✅ *20 downloads* per day\n"
+            f"✅ Works across *all our bots*\n\n"
+            f"⚡ Premium activates *automatically* after payment!",
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
+
+
+async def admin_payments_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin /payments — show recent Razorpay payment records."""
+    if not _is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ You are not authorized to use this command.")
+        return
+
+    payments = await get_recent_payments(limit=10)
+    if not payments:
+        await update.message.reply_text("ℹ️ No payment records found yet.")
+        return
+
+    lines = ["💳 *Recent Razorpay Payments (last 10)*\n"]
+    for p in payments:
+        status_icon = "✅" if p['status'] == 'paid' else "⏳"
+        amount_inr = p['amount_paise'] / 100
+        paid_at = p.get('paid_at') or '—'
+        lines.append(
+            f"{status_icon} uid=`{p['user_id']}` | "
+            f"₹{amount_inr:.0f} | {p['premium_hours']//24}d | "
+            f"{p['status']} | {paid_at[:16]}"
+        )
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode='Markdown'
+    )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1832,6 +1947,88 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                      "Could not process download request. Please try again."
             )
 
+    elif query.data.startswith('rzp_plan_'):
+        # User tapped a payment plan button → create Razorpay link → send QR
+        plan_key  = query.data[len('rzp_plan_'):]
+        user_id   = query.from_user.id
+        chat_id   = query.message.chat_id
+        first_name = query.from_user.first_name or "there"
+
+        # Dismiss button loading spinner immediately
+        try:
+            await context.bot.answer_callback_query(callback_query_id=query.id)
+        except Exception:
+            pass
+
+        plan = RZP_PLANS.get(plan_key)
+        if not plan:
+            await context.bot.send_message(chat_id=chat_id, text="❌ Unknown plan. Please try again.")
+            return
+
+        _, hours, amount_paise, plan_name, _ = plan
+        amount_inr = amount_paise / 100
+        is_life    = (hours >= 87600)
+        days_str   = "Lifetime" if is_life else f"{hours // 24} day{'s' if hours // 24 != 1 else ''}"
+
+        # Show creating indicator
+        wait_msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"⏳ Creating your *{plan_name}* payment link...\nPlease wait!",
+            parse_mode='Markdown'
+        )
+
+        session = await _get_http_session()
+        payment_url, qr_url, pl_id = await create_payment_link_for_plan(
+            user_id, chat_id, first_name, plan_key, session
+        )
+
+        # Delete wait message
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=wait_msg.message_id)
+        except Exception:
+            pass
+
+        if not payment_url or not pl_id:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="❌ Could not create payment link. Please try again or contact admin."
+            )
+            return
+
+        pay_btn = InlineKeyboardButton(
+            f"💳 Pay ₹{amount_inr:.0f} — {plan_name}", url=payment_url
+        )
+        try:
+            qr_msg = await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=qr_url,
+                caption=(
+                    f"📱 *Scan QR or tap the button below to pay*\n\n"
+                    f"💎 *{plan_name} — ₹{amount_inr:.0f}*\n\n"
+                    f"✅ Unlimited videos for *{days_str}*\n"
+                    f"✅ *20 downloads* per day\n"
+                    f"✅ Works across *all our bots*\n\n"
+                    f"🔒 *Safe & secure* — powered by Razorpay\n\n"
+                    f"⚡ Premium activates *automatically* within seconds of payment!"
+                ),
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([[pay_btn]])
+            )
+            # Store QR message_id so webhook can delete it after payment
+            await store_qr_message_id(pl_id, qr_msg.message_id)
+        except Exception as e:
+            print(f"⚠️ [BUY] QR send failed: {e}")
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"💎 *{plan_name} — ₹{amount_inr:.0f}*\n\n"
+                    f"✅ Unlimited videos for *{days_str}*\n\n"
+                    f"⚡ Premium activates automatically after payment!"
+                ),
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([[pay_btn]])
+            )
+
     elif query.data.startswith('vote_'):
         # Format: vote_like_{message_id} or vote_dislike_{message_id} or vote_none_{message_id}
         parts = query.data.split('_')
@@ -1949,8 +2146,13 @@ async def post_init(application: Application):
     # 6. Handle orphaned pending-deletion jobs from previous run
     await _startup_pending_deletion_cleanup(application)
 
+    # 7. Start Razorpay webhook server (background aiohttp server)
+    await start_webhook_server(application, ADMIN_USER_ID, BOT_USERNAME)
+
 async def post_shutdown(application: Application):
     """Clean shutdown: flush all dirty writes and close all DB/HTTP connections."""
+    # Stop Razorpay webhook server first
+    await stop_webhook_server()
     # Cancel both flush loops (each catches CancelledError and does final flush)
     stop_flush_loop()              # user_states flush loop
     if _bot_users_flush_task and not _bot_users_flush_task.done():
@@ -2565,6 +2767,7 @@ def main():
         
         application.add_handler(CommandHandler("start", start_command))
         application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("buy", buy_command))
 
         # ── Admin commands (@Deep12048 only) ──
         application.add_handler(CommandHandler("stats", admin_stats_command))
@@ -2572,6 +2775,7 @@ def main():
         application.add_handler(CommandHandler("cleanvideos", admin_clean_videos_command))
         application.add_handler(CommandHandler("videolikes", admin_video_likes_command))
         application.add_handler(CommandHandler("adminhelp", admin_help_command))
+        application.add_handler(CommandHandler("payments", admin_payments_command))
 
         # Broadcast ConversationHandler in group=-1 (highest priority).
         # MUST be group=-1, not group=0. Reason:
