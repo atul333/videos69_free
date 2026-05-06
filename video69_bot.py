@@ -76,7 +76,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("video69_bot")
 logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)    # suppress httpcore debug spam
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("aiosqlite").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
