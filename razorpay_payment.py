@@ -50,7 +50,7 @@ PLANS: dict[str, tuple] = {
 
 
 RZP_PL_URL    = "https://api.razorpay.com/v1/payment_links"
-RZP_QR_URL    = "https://api.razorpay.com/v1/qr-codes"          # Razorpay QR Codes API
+RZP_QR_URL    = "https://api.razorpay.com/v1/payments/qr_codes"  # NOTE: underscore, not hyphen!
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def _rzp_auth() -> str:
@@ -193,10 +193,10 @@ async def create_qr_code_for_plan(
                 "type":           "upi_qr",
                 "name":           plan_name,
                 "usage":          "single_use",
-                "fixed_amount":   1,              # Must be integer 1, NOT Python True
+                "fixed_amount":   True,             # bool True (Razorpay accepts both True/1)
                 "payment_amount": amount_paise,
                 "description":    description,
-                "close_by":       close_by,        # Required for single_use QR codes
+                "close_by":       close_by,          # Required for single_use
                 "notes": {
                     "user_id":    str(user_id),
                     "first_name": first_name,
@@ -222,8 +222,39 @@ async def create_qr_code_for_plan(
             logger.error(f"[RZP] Missing id/image_url in QR response: {data}")
             return None, None, None
         await _record_created(user_id, chat_id, qr_id, plan_key, plan_name, amount_paise, hours)
-        logger.info(f"[RZP] QR code created uid={user_id} plan={plan_name} id={qr_id}")
-        return image_url, qr_id, qr_id
+        logger.info(f"[RZP] QR code created uid={user_id} plan={plan_name} id={qr_id} image={image_url}")
+        # Download the QR image from Razorpay CDN
+        try:
+            async with session.get(image_url, timeout=aiohttp.ClientTimeout(total=10)) as img_resp:
+                if img_resp.status == 200:
+                    img_bytes = await img_resp.read()
+                    # Crop tightly to show only the QR code (remove Razorpay branding/merchant name)
+                    try:
+                        from PIL import Image as PILImage
+                        import io as _io
+                        img = PILImage.open(_io.BytesIO(img_bytes))
+                        w, h = img.size
+                        # QR code is centered, ~78% width, starts ~32% from top
+                        qr_size = int(w * 0.78)
+                        left    = (w - qr_size) // 2
+                        top     = int(h * 0.32)
+                        pad     = int(w * 0.04)
+                        box     = (max(0, left - pad), max(0, top - pad),
+                                   min(w, left + qr_size + pad), min(h, top + qr_size + pad))
+                        cropped = img.crop(box)
+                        out     = _io.BytesIO()
+                        cropped.save(out, format="PNG")
+                        img_bytes = out.getvalue()
+                        logger.info(f"[RZP] QR cropped to {box}")
+                    except Exception as crop_err:
+                        logger.warning(f"[RZP] Crop failed (using original): {crop_err}")
+                    return img_bytes, qr_id, qr_id
+                else:
+                    logger.warning(f"[RZP] Image download failed HTTP {img_resp.status} — using URL")
+                    return image_url, qr_id, qr_id
+        except Exception as dl_err:
+            logger.warning(f"[RZP] Image download error ({dl_err}) — using URL")
+            return image_url, qr_id, qr_id
     except Exception as e:
         logger.exception(f"[RZP] create_qr_code exception for uid={user_id} plan={plan_key}: {e}")
         return None, None, None
