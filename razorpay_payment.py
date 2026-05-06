@@ -183,22 +183,25 @@ async def create_qr_code_for_plan(
     if not plan:
         return None, None, None
     _, hours, amount_paise, plan_name, description = plan
+    import time as _t
+    close_by = int(_t.time()) + 86400  # QR expires in 24 hours (required field for single_use)
     try:
         async with session.post(
-            RZP_PL_URL,   # Payment Links API (QR Codes API not enabled for this account)
+            RZP_QR_URL,   # https://api.razorpay.com/v1/payments/qr-codes
             json={
-                "amount": amount_paise,
-                "currency": "INR",
-                "accept_partial": False,
-                "description": description,
+                "type":           "upi_qr",
+                "name":           plan_name,
+                "usage":          "single_use",
+                "fixed_amount":   1,              # Must be integer 1, NOT Python True
+                "payment_amount": amount_paise,
+                "description":    description,
+                "close_by":       close_by,        # Required for single_use QR codes
                 "notes": {
                     "user_id":    str(user_id),
                     "first_name": first_name,
                     "plan_key":   plan_key,
                     "plan_name":  plan_name,
                 },
-                "notify":          {"sms": False, "email": False},
-                "reminder_enable": False,
             },
             headers={"Authorization": "Basic " + base64.b64encode(f"{key_id}:{key_secret}".encode()).decode(),
                      "Content-Type": "application/json"},
@@ -207,26 +210,19 @@ async def create_qr_code_for_plan(
             data = await resp.json(content_type=None)
         if resp.status not in (200, 201):
             logger.error(
-                f"[RZP] Payment link creation FAILED — HTTP {resp.status}\n"
+                f"[RZP] QR code creation FAILED — HTTP {resp.status}\n"
                 f"  Request: plan={plan_key} uid={user_id} amount={amount_paise}p\n"
                 f"  Razorpay response: {json.dumps(data, ensure_ascii=False)}"
             )
             return None, None, None
-        pl_id     = data.get("id", "")
-        short_url = data.get("short_url") or data.get("url", "")
-        if not pl_id or not short_url:
-            logger.error(f"[RZP] Missing id/short_url in Payment Link response: {data}")
+        qr_id     = data.get("id", "")
+        image_url = data.get("image_url", "")
+        if not qr_id or not image_url:
+            logger.error(f"[RZP] Missing id/image_url in QR response: {data}")
             return None, None, None
-        # Generate a clean QR image from the payment link URL
-        # margin=0 → bare QR pixels only, no white border (the "crop" effect)
-        qr_image_url = (
-            f"https://api.qrserver.com/v1/create-qr-code/"
-            f"?size=600x600&margin=0&bgcolor=ffffff&color=000000"
-            f"&data={quote(short_url)}"
-        )
-        await _record_created(user_id, chat_id, pl_id, plan_key, plan_name, amount_paise, hours)
-        logger.info(f"[RZP] Payment link created uid={user_id} plan={plan_name} id={pl_id}")
-        return qr_image_url, pl_id, pl_id
+        await _record_created(user_id, chat_id, qr_id, plan_key, plan_name, amount_paise, hours)
+        logger.info(f"[RZP] QR code created uid={user_id} plan={plan_name} id={qr_id}")
+        return image_url, qr_id, qr_id
     except Exception as e:
         logger.exception(f"[RZP] create_qr_code exception for uid={user_id} plan={plan_key}: {e}")
         return None, None, None
