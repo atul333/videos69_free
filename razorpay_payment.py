@@ -50,7 +50,7 @@ PLANS: dict[str, tuple] = {
 
 
 RZP_PL_URL    = "https://api.razorpay.com/v1/payment_links"
-RZP_QR_URL    = "https://api.razorpay.com/v1/payments/qr-codes"  # Razorpay QR Codes API
+RZP_QR_URL    = "https://api.razorpay.com/v1/qr-codes"          # Razorpay QR Codes API
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def _rzp_auth() -> str:
@@ -185,6 +185,7 @@ async def create_qr_code_for_plan(
     _, hours, amount_paise, plan_name, description = plan
     import time as _t
     close_by = int(_t.time()) + 86400  # QR expires in 24 hours (required field for single_use)
+    logger.info(f"[RZP] Calling QR API: POST {RZP_QR_URL} | plan={plan_key} amount={amount_paise}p uid={user_id}")
     try:
         async with session.post(
             RZP_QR_URL,   # https://api.razorpay.com/v1/payments/qr-codes
