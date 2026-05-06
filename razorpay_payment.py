@@ -169,7 +169,25 @@ async def _get_record(pl_id: str) -> Optional[dict]:
         print(f"⚠️ [RZP] get_record: {e}")
         return None
 
-async def _record_paid(pl_id: str, payment_id: str):
+async def _get_record_by_user(user_id: int) -> Optional[dict]:
+    """Fallback: get the most recent 'created' QR record for a user (used when pl_id is empty)."""
+    try:
+        db = await aiosqlite.connect(SHARED_DB_PATH)
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT user_id,chat_id,qr_message_id,limit_message_id,plan_key,plan_name,"
+            "payment_link_id,amount_paise,premium_hours,status "
+            "FROM rzp_payments "
+            "WHERE user_id=? AND status='created' ORDER BY id DESC LIMIT 1",
+            (user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        await db.close()
+        return dict(row) if row else None
+    except Exception as e:
+        print(f"\u26a0\ufe0f [RZP] get_record_by_user: {e}")
+        return None
+
     try:
         db = await aiosqlite.connect(SHARED_DB_PATH)
         await db.execute("PRAGMA journal_mode=WAL")
@@ -392,6 +410,17 @@ async def _handle_success(pl_id, payment_id, user_id_s, event_name,
 
     # DB dedup — catches duplicates across bot restarts
     record = await _get_record(pl_id) if pl_id else None
+    # Fallback for QR payments where payment.authorized has no pl_id:
+    # look up by user_id to get qr_msg_id / limit_msg_id for deletion
+    if record is None and user_id_s:
+        try:
+            record = await _get_record_by_user(int(user_id_s))
+            if record:
+                # Update pl_id so _record_paid marks the correct row
+                pl_id = record.get("payment_link_id") or pl_id
+                logger.info(f"[RZP] Record found by user_id fallback: pl_id={pl_id}")
+        except Exception:
+            pass
     if record and record.get("status") == "paid":
         logger.info(f"[RZP] DB dedup skip pl_id={pl_id}")
         return
@@ -488,20 +517,20 @@ async def _handle_success(pl_id, payment_id, user_id_s, event_name,
             await _tg_app.bot.send_message(
                 chat_id=admin_id,
                 text=(
-                    f"💰 *Payment Received via Razorpay!*\n\n"
+                    f"<b>💰 Payment Received via Razorpay!</b>\n\n"
                     f"🤖 Bot: @{_bot_username}\n"
-                    f"👤 User: ID `{user_id}`\n"
+                    f"👤 User: <code>{user_id}</code>\n"
                     f"⚡️ Plan: {plan_name}\n"
                     f"💰 Amount: ₹{amt_inr:.0f}\n"
-                    f"🆔 Payment ID: `{payment_id}`\n"
+                    f"🆔 Payment ID: <code>{payment_id}</code>\n"
                     f"📞 Contact: {contact or 'None'}\n"
                     f"📧 Email: {email_ or 'None'}\n"
                     f"📅 Paid: {paid_at_str}\n"
-                    f"🔔 Event: `{event_name}`\n\n"
-                    f"✅ *PREMIUM AUTO-GRANTED* ✅\n"
+                    f"🔔 Event: <code>{event_name}</code>\n\n"
+                    f"<b>✅ PREMIUM AUTO-GRANTED</b>\n"
                     f"Valid till: {expiry_str}"
                 ),
-                parse_mode="Markdown",
+                parse_mode="HTML",
             )
             logger.info(f"[RZP] Admin notified uid={user_id} plan={plan_name}")
         except Exception as e:
