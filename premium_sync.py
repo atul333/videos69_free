@@ -80,6 +80,13 @@ CREATE TABLE IF NOT EXISTS shared_downloads (
     downloaded_count INTEGER NOT NULL DEFAULT 0,
     reset_date       TEXT    NOT NULL DEFAULT ''   -- IST date 'YYYY-MM-DD'
 );
+
+-- ── Bot Tokens table ───────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS bot_tokens (
+    token TEXT PRIMARY KEY,
+    bot_username TEXT,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -287,6 +294,42 @@ async def get_all_premium_users_synced() -> Dict[int, datetime]:
     except Exception as e:
         print(f"⚠️ [SharedSync] get_all_premium_users error: {e}")
     return result
+
+
+async def register_bot_token(token: str, username: str):
+    """Register a bot token so webhook can send notifications from all bots."""
+    if not _db_ready or not token:
+        return
+    async with _write_lock:
+        try:
+            db = await _open_db()
+            await db.execute("""
+                INSERT INTO bot_tokens (token, bot_username, updated_at)
+                VALUES (?, ?, datetime('now'))
+                ON CONFLICT(token) DO UPDATE SET
+                    bot_username = excluded.bot_username,
+                    updated_at   = excluded.updated_at
+            """, (token, username))
+            await db.commit()
+            await db.close()
+        except Exception as e:
+            print(f"⚠️ [SharedSync] register_bot_token error: {e}")
+
+async def get_all_bot_tokens() -> list[str]:
+    """Get all registered bot tokens."""
+    if not _db_ready:
+        return []
+    tokens = []
+    try:
+        db = await _open_db()
+        async with db.execute("SELECT token FROM bot_tokens") as cur:
+            async for row in cur:
+                if row[0]:
+                    tokens.append(row[0])
+        await db.close()
+    except Exception as e:
+        print(f"⚠️ [SharedSync] get_all_bot_tokens error: {e}")
+    return tokens
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -534,33 +534,40 @@ async def _handle_success(pl_id, payment_id, user_id_s, event_name,
     if pl_id:
         await _record_paid(pl_id, payment_id)
 
+    from premium_sync import get_all_bot_tokens
+    all_tokens = await get_all_bot_tokens()
+    
+    # Fallback to actual_token if DB empty
     actual_token = target_bot_token or (_tg_app.bot.token if _tg_app else None)
-    if not actual_token:
-        logger.warning("[RZP] No bot token available to send confirmation message.")
+    if not all_tokens and actual_token:
+        all_tokens = [actual_token]
+
+    if not all_tokens:
+        logger.warning("[RZP] No bot tokens available to send confirmation message.")
         return
 
     async with aiohttp.ClientSession() as session:
-        # Delete QR photo message
-        if qr_msg_id and chat_id:
-            try:
-                await session.post(
-                    f"https://api.telegram.org/bot{actual_token}/deleteMessage",
-                    json={"chat_id": chat_id, "message_id": qr_msg_id}
-                )
-                logger.info(f"[RZP] Deleted QR msg {qr_msg_id} via API")
-            except Exception as e:
-                logger.warning(f"[RZP] Delete QR msg: {e}")
+        # Delete QR and Limit messages from the specific bot where it was initiated
+        if actual_token:
+            if qr_msg_id and chat_id:
+                try:
+                    await session.post(
+                        f"https://api.telegram.org/bot{actual_token}/deleteMessage",
+                        json={"chat_id": chat_id, "message_id": qr_msg_id}
+                    )
+                    logger.info(f"[RZP] Deleted QR msg {qr_msg_id} via API")
+                except Exception as e:
+                    logger.warning(f"[RZP] Delete QR msg: {e}")
 
-        # Delete 'Video Limit Reached!' plan-buttons message
-        if limit_msg_id and chat_id:
-            try:
-                await session.post(
-                    f"https://api.telegram.org/bot{actual_token}/deleteMessage",
-                    json={"chat_id": chat_id, "message_id": limit_msg_id}
-                )
-                logger.info(f"[RZP] Deleted limit msg {limit_msg_id} via API")
-            except Exception as e:
-                logger.warning(f"[RZP] Delete limit msg: {e}")
+            if limit_msg_id and chat_id:
+                try:
+                    await session.post(
+                        f"https://api.telegram.org/bot{actual_token}/deleteMessage",
+                        json={"chat_id": chat_id, "message_id": limit_msg_id}
+                    )
+                    logger.info(f"[RZP] Deleted limit msg {limit_msg_id} via API")
+                except Exception as e:
+                    logger.warning(f"[RZP] Delete limit msg: {e}")
 
         # Format expiry
         ist_off    = timedelta(hours=5, minutes=30)
@@ -568,36 +575,38 @@ async def _handle_success(pl_id, payment_id, user_id_s, event_name,
         expiry_str = expiry_ist.strftime("%d %b %Y, %I:%M %p IST")
 
         # \u2500\u2500 User message \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-        try:
-            user_text = (
-                f"\U0001f389 *Premium Activated!*\n\n"
-                f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-                f"\U0001f4e6 Plan        : {plan_name}\n"
-                f"\u23f0 Duration    : {dur_str}\n"
-                f"\U0001f4b0 Amount Paid : \u20b9{amt_inr:.0f}\n"
-                f"\U0001f4c5 Valid Till  : {expiry_str}\n\n"
-                f"\U0001f194 Payment ID  : `{payment_id}`\n"
-                f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\n"
-                f"\U0001f3ab You now have unlimited access!"
-            )
-            await session.post(
-                f"https://api.telegram.org/bot{actual_token}/sendMessage",
-                json={
-                    "chat_id": chat_id,
-                    "text": user_text,
-                    "parse_mode": "Markdown",
-                    "reply_markup": {
-                        "inline_keyboard": [[{"text": "\U0001f3ab Get Video", "callback_data": "next_video"}]]
+        user_text = (
+            f"\U0001f389 *Premium Activated!*\n\n"
+            f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+            f"\U0001f4e6 Plan        : {plan_name}\n"
+            f"\u23f0 Duration    : {dur_str}\n"
+            f"\U0001f4b0 Amount Paid : \u20b9{amt_inr:.0f}\n"
+            f"\U0001f4c5 Valid Till  : {expiry_str}\n\n"
+            f"\U0001f194 Payment ID  : `{payment_id}`\n"
+            f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\n"
+            f"\U0001f3ab You now have unlimited access!"
+        )
+
+        for tk in all_tokens:
+            try:
+                await session.post(
+                    f"https://api.telegram.org/bot{tk}/sendMessage",
+                    json={
+                        "chat_id": chat_id,
+                        "text": user_text,
+                        "parse_mode": "Markdown",
+                        "reply_markup": {
+                            "inline_keyboard": [[{"text": "\U0001f3ab Get Video", "callback_data": "next_video"}]]
+                        }
                     }
-                }
-            )
-        except Exception as e:
-            logger.error(f"[RZP] User notify: {e}")
+                )
+            except Exception as e:
+                logger.error(f"[RZP] User notify failed for token {tk[:10]}...: {e}")
 
         # ── Admin message ──────────────────────────────────────────────────────────────────────────────────────
         admin_id = target_admin_id or _admin_uid or int(os.getenv("ADMIN_USER_ID", "0"))
         logger.info(f"[RZP] Admin notify → admin_id={admin_id} _admin_uid={_admin_uid}")
-        if admin_id:
+        if admin_id and actual_token:
             try:
                 days_val = days if days is not None else "\u221e"
                 await session.post(

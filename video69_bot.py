@@ -46,6 +46,8 @@ from premium_sync import (
     increment_synced_download,
     reset_synced_downloads,
     get_total_synced_downloads_today,
+    # Bot tokens sync
+    register_bot_token,
 )
 
 # Import Razorpay payment integration
@@ -1647,19 +1649,32 @@ async def admin_revoke_command(update: Update, context: ContextTypes.DEFAULT_TYP
         parse_mode='Markdown'
     )
 
-    # Optionally notify the user
-    try:
-        await context.bot.send_message(
-            chat_id=target_uid,
-            text=(
-                "❌ *Your premium access has been revoked.*\n\n"
-                "If you believe this is a mistake, please contact the admin.\n"
-                "You can still use the bot with the free daily limit."
-            ),
-            parse_mode='Markdown'
-        )
-    except Exception:
-        pass  # User may have blocked the bot
+    # Broadcast notification to the user across all registered bots
+    from premium_sync import get_all_bot_tokens
+    all_tokens = await get_all_bot_tokens()
+    
+    if not all_tokens and BOT_TOKEN:
+        all_tokens = [BOT_TOKEN]
+
+    user_text = (
+        "❌ *Your premium access has been revoked.*\n\n"
+        "If you believe this is a mistake, please contact the admin.\n"
+        "You can still use the bot with the free daily limit."
+    )
+
+    async with aiohttp.ClientSession() as session:
+        for tk in all_tokens:
+            try:
+                await session.post(
+                    f"https://api.telegram.org/bot{tk}/sendMessage",
+                    json={
+                        "chat_id": target_uid,
+                        "text": user_text,
+                        "parse_mode": "Markdown"
+                    }
+                )
+            except Exception as e:
+                logger.error(f"Failed to send revoke notification to {target_uid} via token {tk[:10]}...: {e}")
 
     print(f"🗑️ [REVOKE] Admin revoked premium for uid={target_uid}")
 
@@ -1714,20 +1729,33 @@ async def admin_approve_command(update: Update, context: ContextTypes.DEFAULT_TY
         parse_mode='Markdown'
     )
 
-    # Optionally notify the user
-    try:
-        await context.bot.send_message(
-            chat_id=target_uid,
-            text=(
-                f"🎉 **Premium Access Granted by Admin!**\n\n"
-                f"You have been granted **{days} days** of unlimited premium access!\n\n"
-                f"⏰ Expires: *{expiry_local.strftime('%d %b %Y, %I:%M %p')} IST*\n\n"
-                f"Enjoy unlimited videos and downloads! 🍿"
-            ),
-            parse_mode='Markdown'
-        )
-    except Exception:
-        pass  # User may have blocked the bot
+    # Broadcast notification to the user across all registered bots
+    from premium_sync import get_all_bot_tokens
+    all_tokens = await get_all_bot_tokens()
+    
+    if not all_tokens and BOT_TOKEN:
+        all_tokens = [BOT_TOKEN]
+
+    user_text = (
+        f"🎉 **Premium Access Granted by Admin!**\n\n"
+        f"You have been granted **{days} days** of unlimited premium access!\n\n"
+        f"⏰ Expires: *{expiry_local.strftime('%d %b %Y, %I:%M %p')} IST*\n\n"
+        f"Enjoy unlimited videos and downloads! 🍿"
+    )
+
+    async with aiohttp.ClientSession() as session:
+        for tk in all_tokens:
+            try:
+                await session.post(
+                    f"https://api.telegram.org/bot{tk}/sendMessage",
+                    json={
+                        "chat_id": target_uid,
+                        "text": user_text,
+                        "parse_mode": "Markdown"
+                    }
+                )
+            except Exception as e:
+                logger.error(f"Failed to send approve notification to {target_uid} via token {tk[:10]}...: {e}")
 
     print(f"✅ [APPROVE] Admin granted premium for uid={target_uid} for {days} days")
 
@@ -2365,6 +2393,8 @@ async def post_init(application: Application):
 
     # 3. Init shared premium sync DB (cross-bot premium sharing)
     await init_premium_sync()
+    if BOT_TOKEN:
+        await register_bot_token(BOT_TOKEN, BOT_USERNAME)
 
     # 4. Load available video IDs from the channel
     await load_videos_from_channel(application)
@@ -2616,6 +2646,82 @@ async def send_daily_admin_report(context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         print(f"⚠️ Daily admin report failed: {e}")
+
+
+async def check_expired_premiums_job(context: ContextTypes.DEFAULT_TYPE):
+    """Background task to check for newly expired premiums in local state and notify the user."""
+    now = _now_utc()
+    expired_users = []
+    
+    for uid, state in list(user_states.items()):
+        puntil = state.get("premium_until")
+        if puntil and now >= puntil:
+            # It just expired!
+            expired_users.append(uid)
+            
+            # Clear local state so we don't notify again
+            state["premium_until"] = None
+            save_user_states(user_states, _hint_uid=uid)
+            _membership_cache.pop(uid, None)
+
+    if not expired_users:
+        return
+
+    # Broadcast notification to the user across all registered bots
+    from premium_sync import get_all_bot_tokens
+    all_tokens = await get_all_bot_tokens()
+    
+    if not all_tokens and BOT_TOKEN:
+        all_tokens = [BOT_TOKEN]
+
+    async with aiohttp.ClientSession() as session:
+        for uid in expired_users:
+            # Calculate time until next free video reset
+            now_ist = now + _IST_OFFSET
+            next_reset_ist = (now_ist + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            next_reset = next_reset_ist - _IST_OFFSET
+            time_until_reset = next_reset - now
+            minutes_until_reset = int(time_until_reset.total_seconds() / 60)
+            hours_until_reset = int(time_until_reset.total_seconds() / 3600)
+            if hours_until_reset > 0:
+                time_msg = f"{hours_until_reset} hour(s) and {minutes_until_reset % 60} minute(s)"
+            else:
+                time_msg = f"{minutes_until_reset} minute(s)"
+            
+            # Build plan + ad keyboard
+            aro_url, vp_url = await create_shortened_links(uid)
+            keyboard = [[InlineKeyboardButton(lbl, callback_data=f'rzp_plan_{k}')]
+                        for k, (lbl, *_) in RZP_PLANS.items()]
+            if aro_url:
+                keyboard.append([InlineKeyboardButton("🔥 AroLinks — Watch Ad & Get Premium", url=aro_url)])
+            if vp_url:
+                keyboard.append([InlineKeyboardButton("⚡ VPLink — Watch Ad & Get Premium", url=vp_url)])
+            if not aro_url and not vp_url:
+                keyboard.append([InlineKeyboardButton("🔥▶️ Watch Ad → Get FREE Premium! 🎁", callback_data='watch_ad')])
+            
+            user_text = (
+                "🚫 **Video Limit Reached!**\n\n"
+                "You've used your free video. Buy a plan or watch an ad to continue watching ⬇️\n\n"
+                f"⏳ Next free video in: **{time_msg}**"
+            )
+            
+            reply_markup_dict = {
+                "inline_keyboard": [[{"text": btn.text, "callback_data": btn.callback_data} if btn.callback_data else {"text": btn.text, "url": btn.url}] for btn in row] for row in keyboard
+            }
+
+            for tk in all_tokens:
+                try:
+                    await session.post(
+                        f"https://api.telegram.org/bot{tk}/sendMessage",
+                        json={
+                            "chat_id": uid,
+                            "text": user_text,
+                            "parse_mode": "Markdown",
+                            "reply_markup": reply_markup_dict
+                        }
+                    )
+                except Exception:
+                    pass  # User might have blocked the bot
 
 
 async def admin_video_likes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3093,6 +3199,14 @@ def main():
         )
         print(f"📊 Daily admin report scheduled at 11:58 PM IST")
         print(f"   First report in: {int(seconds_until_report / 3600)}h {int((seconds_until_report % 3600) / 60)}m")
+
+        # ── Premium expiration checker ──
+        job_queue.run_repeating(
+            check_expired_premiums_job,
+            interval=60,             # check every 60 seconds
+            name='premium_expiry_check'
+        )
+        print(f"💎 Premium expiration checker scheduled (runs every 60 seconds)")
         
         print(f"📢 Daily broadcast scheduler enabled!")
         print(f"   Current time: {now_ist.strftime('%I:%M %p')} IST")
