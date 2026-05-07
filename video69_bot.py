@@ -135,10 +135,10 @@ user_states = load_user_states()
 used_tokens: set = set()
 _MAX_USED_TOKENS = 10000  # Evict oldest when this limit is reached
 
-# Per-user cooldown: user_id → timestamp of last video served (1 video per 60s)
+# Per-user cooldown: user_id → timestamp of last video served (1 video per 3s)
 import time as _time
 _next_video_cooldown: dict[int, float] = {}
-_NEXT_VIDEO_COOLDOWN_SECONDS = 60
+_NEXT_VIDEO_COOLDOWN_SECONDS = 3
 
 # Video limit for free users (resets every 24 hours)
 DAILY_VIDEO_LIMIT = 1  # Free users can watch 1 video per day
@@ -1784,22 +1784,27 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     elif query.data == 'next_video':
         user_id = query.from_user.id
-        now = _time.monotonic()
-        last_served = _next_video_cooldown.get(user_id, 0.0)
-        elapsed = now - last_served
+        
+        # Check if the clicked button is specifically "▶️ Next"
+        is_actual_next_button = False
+        if query.message and query.message.reply_markup and query.message.reply_markup.inline_keyboard:
+            for row in query.message.reply_markup.inline_keyboard:
+                for btn in row:
+                    if btn.callback_data == 'next_video' and btn.text == "▶️ Next":
+                        is_actual_next_button = True
+                        break
 
-        if elapsed < _NEXT_VIDEO_COOLDOWN_SECONDS:
-            remaining = int(_NEXT_VIDEO_COOLDOWN_SECONDS - elapsed)
-            try:
-                await query.answer(
-                    f"⏳ Please wait {remaining}s before requesting the next video.",
-                    show_alert=True
-                )
-            except Exception:
-                pass
-            return
+        # Only apply the cooldown and "Processing..." visual to the actual "▶️ Next" button
+        if is_actual_next_button:
+            now = _time.monotonic()
+            last_served = _next_video_cooldown.get(user_id, 0.0)
+            elapsed = now - last_served
 
-        _next_video_cooldown[user_id] = now
+            if elapsed < _NEXT_VIDEO_COOLDOWN_SECONDS:
+                # Silently ignore clicks within the cooldown
+                return
+
+            _next_video_cooldown[user_id] = now
 
         try:
             await query.answer()
@@ -1807,25 +1812,41 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
         try:
-            try:
-                if query.message.reply_markup and query.message.reply_markup.inline_keyboard:
-                    new_keyboard = []
-                    changed = False
-                    for row in query.message.reply_markup.inline_keyboard:
-                        new_row = []
-                        for btn in row:
-                            if btn.callback_data == 'next_video':
-                                new_row.append(InlineKeyboardButton("⏳ Processing...", callback_data='ignore'))
-                                changed = True
-                            else:
-                                new_row.append(btn)
-                        new_keyboard.append(new_row)
-                    
-                    if changed:
-                        await query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(new_keyboard))
-            except Exception as e:
-                if "Message is not modified" not in str(e) and "Message can't be edited" not in str(e):
-                    print(f"⚠️ Error updating next_video button: {e}")
+            if is_actual_next_button:
+                try:
+                    if query.message.reply_markup and query.message.reply_markup.inline_keyboard:
+                        original_keyboard = []
+                        new_keyboard = []
+                        changed = False
+                        for row in query.message.reply_markup.inline_keyboard:
+                            new_row = []
+                            orig_row = []
+                            for btn in row:
+                                orig_row.append(btn)
+                                if btn.callback_data == 'next_video' and btn.text == "▶️ Next":
+                                    new_row.append(InlineKeyboardButton("⏳ Processing...", callback_data='ignore'))
+                                    changed = True
+                                else:
+                                    new_row.append(btn)
+                            new_keyboard.append(new_row)
+                            original_keyboard.append(orig_row)
+                        
+                        if changed:
+                            await query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(new_keyboard))
+                            # Schedule restoration of the button after cooldown
+                            context.job_queue.run_once(
+                                restore_button_callback,
+                                when=_NEXT_VIDEO_COOLDOWN_SECONDS,
+                                data={
+                                    'chat_id': query.message.chat_id,
+                                    'message_id': query.message.message_id,
+                                    'original_keyboard': original_keyboard
+                                },
+                                name=f"restore_btn_{query.message.chat_id}_{query.message.message_id}"
+                            )
+                except Exception as e:
+                    if "Message is not modified" not in str(e) and "Message can't be edited" not in str(e):
+                        print(f"⚠️ Error updating next_video button: {e}")
 
             await rate_limited_send_video(
                 update,
@@ -1834,7 +1855,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user_id=user_id
             )
         except Exception:
-            _next_video_cooldown.pop(user_id, None)
+            if is_actual_next_button:
+                _next_video_cooldown.pop(user_id, None)
             raise
     
     elif query.data == 'unlock_premium':
