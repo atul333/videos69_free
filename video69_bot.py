@@ -135,6 +135,11 @@ user_states = load_user_states()
 used_tokens: set = set()
 _MAX_USED_TOKENS = 10000  # Evict oldest when this limit is reached
 
+# Per-user cooldown: user_id → timestamp of last video served (1 video per 60s)
+import time as _time
+_next_video_cooldown: dict[int, float] = {}
+_NEXT_VIDEO_COOLDOWN_SECONDS = 60
+
 # Video limit for free users (resets every 24 hours)
 DAILY_VIDEO_LIMIT = 1  # Free users can watch 1 video per day
 # Premium access duration after watching ad (12 hours)
@@ -1724,10 +1729,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
 
     # Answer the query immediately (Telegram requires this within 30s)
-    try:
-        await query.answer()
-    except Exception:
-        pass  # Silently ignore expired/old queries
+    # Skip for next_video — it handles its own answer (cooldown alert)
+    if query.data != 'next_video':
+        try:
+            await query.answer()
+        except Exception:
+            pass
     
     if query.data == 'check_membership':
         user_id = query.from_user.id
@@ -1776,34 +1783,59 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
         
     elif query.data == 'next_video':
-        # Edit the button to "⏳ Processing..." to prevent multiple clicks
-        try:
-            if query.message.reply_markup and query.message.reply_markup.inline_keyboard:
-                new_keyboard = []
-                changed = False
-                for row in query.message.reply_markup.inline_keyboard:
-                    new_row = []
-                    for btn in row:
-                        if btn.callback_data == 'next_video':
-                            new_row.append(InlineKeyboardButton("⏳ Processing...", callback_data='ignore'))
-                            changed = True
-                        else:
-                            new_row.append(btn)
-                    new_keyboard.append(new_row)
-                
-                if changed:
-                    await query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(new_keyboard))
-        except Exception as e:
-            if "Message is not modified" not in str(e) and "Message can't be edited" not in str(e):
-                print(f"⚠️ Error updating next_video button: {e}")
+        user_id = query.from_user.id
+        now = _time.monotonic()
+        last_served = _next_video_cooldown.get(user_id, 0.0)
+        elapsed = now - last_served
 
-        # Use rate-limited version to prevent overload
-        await rate_limited_send_video(
-            update,
-            context,
-            chat_id=query.message.chat_id,
-            user_id=query.from_user.id
-        )
+        if elapsed < _NEXT_VIDEO_COOLDOWN_SECONDS:
+            remaining = int(_NEXT_VIDEO_COOLDOWN_SECONDS - elapsed)
+            try:
+                await query.answer(
+                    f"⏳ Please wait {remaining}s before requesting the next video.",
+                    show_alert=True
+                )
+            except Exception:
+                pass
+            return
+
+        _next_video_cooldown[user_id] = now
+
+        try:
+            await query.answer()
+        except Exception:
+            pass
+
+        try:
+            try:
+                if query.message.reply_markup and query.message.reply_markup.inline_keyboard:
+                    new_keyboard = []
+                    changed = False
+                    for row in query.message.reply_markup.inline_keyboard:
+                        new_row = []
+                        for btn in row:
+                            if btn.callback_data == 'next_video':
+                                new_row.append(InlineKeyboardButton("⏳ Processing...", callback_data='ignore'))
+                                changed = True
+                            else:
+                                new_row.append(btn)
+                        new_keyboard.append(new_row)
+                    
+                    if changed:
+                        await query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(new_keyboard))
+            except Exception as e:
+                if "Message is not modified" not in str(e) and "Message can't be edited" not in str(e):
+                    print(f"⚠️ Error updating next_video button: {e}")
+
+            await rate_limited_send_video(
+                update,
+                context,
+                chat_id=query.message.chat_id,
+                user_id=user_id
+            )
+        except Exception:
+            _next_video_cooldown.pop(user_id, None)
+            raise
     
     elif query.data == 'unlock_premium':
         # User clicked "Unlock Premium" button - show Watch Ad option
