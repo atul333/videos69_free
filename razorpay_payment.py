@@ -86,9 +86,11 @@ CREATE INDEX IF NOT EXISTS idx_rzp_user ON rzp_payments(user_id);
 _NEW_COLS = [
     ("chat_id",          "INTEGER"),
     ("qr_message_id",    "INTEGER"),
-    ("limit_message_id", "INTEGER"),   # message_id of 'Video Limit Reached!' plan-buttons msg
+    ("limit_message_id", "INTEGER"),
     ("plan_key",         "TEXT NOT NULL DEFAULT '?'"),
     ("plan_name",        "TEXT NOT NULL DEFAULT 'Premium'"),
+    ("bot_token",        "TEXT"),
+    ("admin_id",         "INTEGER"),
 ]
 
 async def _ensure_payments_table():
@@ -110,15 +112,15 @@ async def _ensure_payments_table():
     except Exception as e:
         print(f"⚠️ [RZP] payments table init error: {e}")
 
-async def _record_created(user_id, chat_id, pl_id, plan_key, plan_name, amount_paise, hours):
+async def _record_created(user_id, chat_id, pl_id, plan_key, plan_name, amount_paise, hours, bot_token=None, admin_id=None):
     try:
         db = await aiosqlite.connect(SHARED_DB_PATH)
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute(
             "INSERT OR IGNORE INTO rzp_payments "
-            "(user_id,chat_id,payment_link_id,plan_key,plan_name,amount_paise,premium_hours,status) "
-            "VALUES (?,?,?,?,?,?,?,'created')",
-            (user_id, chat_id, pl_id, plan_key, plan_name, amount_paise, hours)
+            "(user_id,chat_id,payment_link_id,plan_key,plan_name,amount_paise,premium_hours,status,bot_token,admin_id) "
+            "VALUES (?,?,?,?,?,?,?,'created',?,?)",
+            (user_id, chat_id, pl_id, plan_key, plan_name, amount_paise, hours, bot_token, admin_id)
         )
         await db.commit()
         await db.close()
@@ -159,7 +161,7 @@ async def _get_record(pl_id: str) -> Optional[dict]:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT user_id,chat_id,qr_message_id,limit_message_id,plan_key,plan_name,"
-            "amount_paise,premium_hours,status FROM rzp_payments WHERE payment_link_id=?",
+            "amount_paise,premium_hours,status,bot_token,admin_id FROM rzp_payments WHERE payment_link_id=?",
             (pl_id,)
         ) as cur:
             row = await cur.fetchone()
@@ -176,7 +178,7 @@ async def _get_record_by_user(user_id: int) -> Optional[dict]:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT user_id,chat_id,qr_message_id,limit_message_id,plan_key,plan_name,"
-            "payment_link_id,amount_paise,premium_hours,status "
+            "payment_link_id,amount_paise,premium_hours,status,bot_token,admin_id "
             "FROM rzp_payments "
             "WHERE user_id=? AND status='created' ORDER BY id DESC LIMIT 1",
             (user_id,)
@@ -185,12 +187,12 @@ async def _get_record_by_user(user_id: int) -> Optional[dict]:
         await db.close()
         return dict(row) if row else None
     except Exception as e:
-        print(f"\u26a0\ufe0f [RZP] get_record_by_user: {e}")
+        print(f"⚠️ [RZP] get_record_by_user: {e}")
         return None
 
 import asyncio
 
-async def _poll_qr_payment(qr_id: str, user_id_s: str, plan_key: str, plan_name: str, amount_paise: int, session: aiohttp.ClientSession):
+async def _poll_qr_payment(qr_id: str, user_id_s: str, plan_key: str, plan_name: str, amount_paise: int, session: aiohttp.ClientSession, bot_token: str = None, admin_id: int = None):
     """Poll Razorpay API every 5 seconds for up to 5 minutes to detect payment instantly."""
     key_id = os.getenv("RAZORPAY_KEY_ID", "") or RZP_KEY_ID
     key_secret = os.getenv("RAZORPAY_KEY_SECRET", "") or RZP_KEY_SECRET
@@ -223,7 +225,7 @@ async def _poll_qr_payment(qr_id: str, user_id_s: str, plan_key: str, plan_name:
                                 logger.info(f"[RZP] Polling detected payment {payment_id} for QR {qr_id}!")
                                 await _handle_success(
                                     qr_id, payment_id, user_id_s, "poll.detected", 
-                                    amount_paise, contact, email_, paid_at_str, plan_key, plan_name
+                                    amount_paise, contact, email_, paid_at_str, plan_key, plan_name, bot_token, admin_id
                                 )
                                 return # Stop polling once handled!
         except asyncio.CancelledError:
@@ -283,7 +285,8 @@ async def create_qr_code_for_plan(
                     "first_name": first_name,
                     "plan_key":   plan_key,
                     "plan_name":  plan_name,
-                    "bot_token":  _tg_app.bot.token if _tg_app else ""
+                    "bot_token":  _tg_app.bot.token if _tg_app else "",
+                    "admin_id":   str(os.getenv("ADMIN_USER_ID", "0"))
                 },
             },
             headers={"Authorization": "Basic " + base64.b64encode(f"{key_id}:{key_secret}".encode()).decode(),
@@ -303,11 +306,14 @@ async def create_qr_code_for_plan(
         if not qr_id or not image_url:
             logger.error(f"[RZP] Missing id/image_url in QR response: {data}")
             return None, None, None
-        await _record_created(user_id, chat_id, qr_id, plan_key, plan_name, amount_paise, hours)
+        
+        bot_token = _tg_app.bot.token if _tg_app else ""
+        admin_id = int(os.getenv("ADMIN_USER_ID", "0"))
+        await _record_created(user_id, chat_id, qr_id, plan_key, plan_name, amount_paise, hours, bot_token, admin_id)
         logger.info(f"[RZP] QR code created uid={user_id} plan={plan_name} id={qr_id} image={image_url}")
         
         # Start background polling to grant premium instantly
-        asyncio.create_task(_poll_qr_payment(qr_id, str(user_id), plan_key, plan_name, amount_paise, session))
+        asyncio.create_task(_poll_qr_payment(qr_id, str(user_id), plan_key, plan_name, amount_paise, session, bot_token, admin_id))
         
         # Download the QR image from Razorpay CDN
         try:
@@ -416,9 +422,10 @@ async def _webhook_handler(request: web.Request) -> web.Response:
         plan_key   = notes.get("plan_key", "1d")
         plan_name  = notes.get("plan_name", "Premium")
         target_bot_token = notes.get("bot_token")
+        target_admin_id = int(notes.get("admin_id", 0)) if notes.get("admin_id") else None
         await _handle_success(pl_id, payment_id, user_id_s, ev,
                               amount_paid, contact, email_, paid_at_str, plan_key, plan_name,
-                              target_bot_token)
+                              target_bot_token, target_admin_id)
 
     # Razorpay QR Code payment event
     elif ev == "qr_code.credited":
@@ -436,10 +443,11 @@ async def _webhook_handler(request: web.Request) -> web.Response:
         plan_key    = notes.get("plan_key", "1d")
         plan_name   = notes.get("plan_name", "Premium")
         target_bot_token = notes.get("bot_token")
+        target_admin_id = int(notes.get("admin_id", 0)) if notes.get("admin_id") else None
         # qr_id is stored as pl_id in our DB
         await _handle_success(qr_id, payment_id, user_id_s, ev,
                               amount_paid, contact, email_, paid_at_str, plan_key, plan_name,
-                              target_bot_token)
+                              target_bot_token, target_admin_id)
 
     return web.Response(status=200, text="ok")
 
@@ -455,7 +463,7 @@ def _ts_to_str(ts) -> str:
 
 async def _handle_success(pl_id, payment_id, user_id_s, event_name,
                            amount_paid, contact, email_, paid_at_str, plan_key, plan_name,
-                           target_bot_token=None):
+                           target_bot_token=None, target_admin_id=None):
     global _processed_payments
     # Fast in-memory dedup — catches simultaneous duplicate webhook events before DB hit
     dedup_key = payment_id or pl_id
@@ -499,6 +507,8 @@ async def _handle_success(pl_id, payment_id, user_id_s, event_name,
         qr_msg_id     = record.get("qr_message_id")
         limit_msg_id  = record.get("limit_message_id")
         amt_paise     = record.get("amount_paise")  or amount_paid
+        target_bot_token = target_bot_token or record.get("bot_token")
+        target_admin_id = target_admin_id or record.get("admin_id")
     else:
         hours         = PLANS.get(plan_key, ("",24))[1]
         chat_id       = user_id
@@ -584,9 +594,9 @@ async def _handle_success(pl_id, payment_id, user_id_s, event_name,
         except Exception as e:
             logger.error(f"[RZP] User notify: {e}")
 
-        # \u2500\u2500 Admin message \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-        admin_id = _admin_uid or int(os.getenv("ADMIN_USER_ID", "0"))
-        logger.info(f"[RZP] Admin notify \u2192 admin_id={admin_id} _admin_uid={_admin_uid}")
+        # ── Admin message ──────────────────────────────────────────────────────────────────────────────────────
+        admin_id = target_admin_id or _admin_uid or int(os.getenv("ADMIN_USER_ID", "0"))
+        logger.info(f"[RZP] Admin notify → admin_id={admin_id} _admin_uid={_admin_uid}")
         if admin_id:
             try:
                 days_val = days if days is not None else "\u221e"
