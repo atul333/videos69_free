@@ -1679,6 +1679,52 @@ async def admin_revoke_command(update: Update, context: ContextTypes.DEFAULT_TYP
     print(f"🗑️ [REVOKE] Admin revoked premium for uid={target_uid}")
 
 
+async def admin_checkpremium_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin /checkpremium <user_id> — check if a user has active premium."""
+    if not _is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ You are not authorized to use this command.")
+        return
+
+    if not context.args or len(context.args) < 1:
+        await update.message.reply_text(
+            "⚠️ *Usage:* `/checkpremium <user_id>`\n\n"
+            "*Example:* `/checkpremium 7708376300`\n\n"
+            "This will show if the user has active premium and when it expires.",
+            parse_mode='Markdown'
+        )
+        return
+
+    try:
+        target_uid = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID. Must be a number.")
+        return
+
+    # Check premium status
+    from premium_sync import get_premium_until_synced, is_premium_synced
+    is_active = await is_premium_synced(target_uid)
+    premium_until = await get_premium_until_synced(target_uid)
+
+    if is_active and premium_until:
+        expiry_local = utc_to_ist(premium_until)
+        await update.message.reply_text(
+            f"✅ *User Has Active Premium!*\n\n"
+            f"👤 User ID: `{target_uid}`\n"
+            f"⏰ Expires: *{expiry_local.strftime('%d %b %Y, %I:%M %p')} IST*\n\n"
+            f"Premium is active across *all bots*.",
+            parse_mode='Markdown'
+        )
+    else:
+        await update.message.reply_text(
+            f"❌ *No Active Premium*\n\n"
+            f"👤 User ID: `{target_uid}`\n\n"
+            f"This user does NOT have active premium access.",
+            parse_mode='Markdown'
+        )
+
+    print(f"🔍 [CHECKPREMIUM] Admin checked premium for uid={target_uid} (active={is_active})")
+
+
 async def admin_approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin /approve <user_id> <days> — grant a user premium across ALL bots for specific days."""
     if not _is_admin(update.effective_user.id):
@@ -2849,6 +2895,7 @@ async def admin_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "  /cleanvideos — Delete overdue video messages\n"
         "               (stuck after bot restart)\n\n"
         "👑 *Premium Management*\n"
+        "  /checkpremium <uid> — Check if user has active premium\n"
         "  /approve <uid> <days> — Grant premium manually\n"
         "  /revoke <uid> — Remove premium manually\n\n"
         "ℹ️ *Help*\n"
@@ -3126,6 +3173,7 @@ def main():
         application.add_handler(CommandHandler("payments", admin_payments_command))
         application.add_handler(CommandHandler("revoke", admin_revoke_command))
         application.add_handler(CommandHandler("approve", admin_approve_command))
+        application.add_handler(CommandHandler("checkpremium", admin_checkpremium_command))
 
         # Broadcast ConversationHandler in group=-1 (highest priority).
         # MUST be group=-1, not group=0. Reason:
