@@ -135,10 +135,10 @@ user_states = load_user_states()
 used_tokens: set = set()
 _MAX_USED_TOKENS = 10000  # Evict oldest when this limit is reached
 
-# Per-user cooldown: user_id → timestamp of last video served (1 video per 1s)
+# Per-user cooldown: user_id → timestamp of last video served (1 video per 2s)
 import time as _time
 _next_video_cooldown: dict[int, float] = {}
-_NEXT_VIDEO_COOLDOWN_SECONDS = 1
+_NEXT_VIDEO_COOLDOWN_SECONDS = 2
 
 # Video limit for free users (resets every 24 hours)
 DAILY_VIDEO_LIMIT = 1  # Free users can watch 1 video per day
