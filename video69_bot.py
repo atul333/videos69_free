@@ -1742,6 +1742,12 @@ async def admin_approve_command(update: Update, context: ContextTypes.DEFAULT_TY
         f"⏰ Expires: *{expiry_local.strftime('%d %b %Y, %I:%M %p')} IST*\n\n"
         f"Enjoy unlimited videos and downloads! 🍿"
     )
+    
+    # Create inline keyboard with Get Video button
+    keyboard = [[InlineKeyboardButton("🎬 Get Video", callback_data='next_video')]]
+    reply_markup_dict = {
+        "inline_keyboard": [[{"text": btn.text, "callback_data": btn.callback_data} for btn in row] for row in keyboard]
+    }
 
     async with aiohttp.ClientSession() as session:
         for tk in all_tokens:
@@ -1751,7 +1757,8 @@ async def admin_approve_command(update: Update, context: ContextTypes.DEFAULT_TY
                     json={
                         "chat_id": target_uid,
                         "text": user_text,
-                        "parse_mode": "Markdown"
+                        "parse_mode": "Markdown",
+                        "reply_markup": reply_markup_dict
                     }
                 )
             except Exception as e:
