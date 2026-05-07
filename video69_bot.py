@@ -746,9 +746,7 @@ async def is_premium_user_async(user_id: int) -> bool:
     # May 1 free-premium day — everyone is premium, no DB needed
     if _is_may1_free_day():
         return True
-    # Fast local check first (zero I/O)
-    if is_premium_user(user_id):
-        return True
+        
     # Cross-bot shared check (cached, ≤1 DB read per user per 60 s)
     shared = await is_premium_synced(user_id)
     if shared:
@@ -761,7 +759,19 @@ async def is_premium_user_async(user_id: int) -> bool:
                 init_user_state(user_id)
             user_states[user_id]['premium_until'] = puntil
             save_user_states(user_states, _hint_uid=user_id)
-    return shared
+        return True
+
+    # If shared is False, it could mean premium expired, was revoked, or DB is offline.
+    from premium_sync import _db_ready
+    if _db_ready:
+        # DB is online but user is not premium. Clear local state if it exists.
+        if user_id in user_states and user_states[user_id].get('premium_until'):
+            user_states[user_id]['premium_until'] = None
+            save_user_states(user_states, _hint_uid=user_id)
+        return False
+    else:
+        # DB is offline, fallback to fast local check
+        return is_premium_user(user_id)
 
 
 def check_and_reset_daily_limit(user_id: int) -> bool:
@@ -1652,6 +1662,74 @@ async def admin_revoke_command(update: Update, context: ContextTypes.DEFAULT_TYP
         pass  # User may have blocked the bot
 
     print(f"🗑️ [REVOKE] Admin revoked premium for uid={target_uid}")
+
+
+async def admin_approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin /approve <user_id> <days> — grant a user premium across ALL bots for specific days."""
+    if not _is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ You are not authorized to use this command.")
+        return
+
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "⚠️ *Usage:* `/approve <user_id> <number_of_days>`\n\n"
+            "*Example:* `/approve 7708376300 30`\n\n"
+            "This will immediately grant premium access to the user across ALL bots.",
+            parse_mode='Markdown'
+        )
+        return
+
+    try:
+        target_uid = int(context.args[0])
+        days = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text("❌ Invalid arguments. Both user ID and days must be numbers.")
+        return
+
+    if days <= 0:
+        await update.message.reply_text("❌ Days must be greater than 0.")
+        return
+
+    # Grant premium in shared DB
+    hours = days * 24
+    from premium_sync import grant_premium_synced
+    premium_until = await grant_premium_synced(target_uid, hours=hours)
+
+    # Update local state if the user exists here
+    if target_uid in user_states:
+        user_states[target_uid]['premium_until'] = premium_until
+        save_user_states(user_states, _hint_uid=target_uid)
+
+    # Invalidate membership cache so next check re-evaluates premium state
+    _membership_cache.pop(target_uid, None)
+
+    expiry_local = utc_to_ist(premium_until)
+
+    await update.message.reply_text(
+        f"✅ *Premium Approved!*\n\n"
+        f"👤 User ID: `{target_uid}`\n"
+        f"⏳ Duration: *{days} Days*\n"
+        f"⏰ Expires: *{expiry_local.strftime('%d %b %Y, %I:%M %p')} IST*\n\n"
+        f"Premium access granted across *all bots* immediately.",
+        parse_mode='Markdown'
+    )
+
+    # Optionally notify the user
+    try:
+        await context.bot.send_message(
+            chat_id=target_uid,
+            text=(
+                f"🎉 **Premium Access Granted by Admin!**\n\n"
+                f"You have been granted **{days} days** of unlimited premium access!\n\n"
+                f"⏰ Expires: *{expiry_local.strftime('%d %b %Y, %I:%M %p')} IST*\n\n"
+                f"Enjoy unlimited videos and downloads! 🍿"
+            ),
+            parse_mode='Markdown'
+        )
+    except Exception:
+        pass  # User may have blocked the bot
+
+    print(f"✅ [APPROVE] Admin granted premium for uid={target_uid} for {days} days")
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2657,6 +2735,9 @@ async def admin_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "🧹 *Maintenance*\n"
         "  /cleanvideos — Delete overdue video messages\n"
         "               (stuck after bot restart)\n\n"
+        "👑 *Premium Management*\n"
+        "  /approve <uid> <days> — Grant premium manually\n"
+        "  /revoke <uid> — Remove premium manually\n\n"
         "ℹ️ *Help*\n"
         "  /adminhelp — Show this help message\n\n"
         "_All commands are restricted to the bot admin only._"
@@ -2931,6 +3012,7 @@ def main():
         application.add_handler(CommandHandler("adminhelp", admin_help_command))
         application.add_handler(CommandHandler("payments", admin_payments_command))
         application.add_handler(CommandHandler("revoke", admin_revoke_command))
+        application.add_handler(CommandHandler("approve", admin_approve_command))
 
         # Broadcast ConversationHandler in group=-1 (highest priority).
         # MUST be group=-1, not group=0. Reason:
