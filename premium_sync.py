@@ -50,8 +50,8 @@ SHARED_DB_PATH = os.getenv("SHARED_PREMIUM_DB", "/home/ubuntu/premium_shared.db"
 _IST = timedelta(hours=5, minutes=30)
 
 # Premium cache TTL: how long (seconds) to trust a cached result before re-querying DB.
-# 60 s = fresh enough that a cross-bot premium grant propagates quickly.
-PREMIUM_CACHE_TTL = 60
+# 1 s = instant cross-bot premium grant propagation.
+PREMIUM_CACHE_TTL = 1
 
 # ── In-memory caches ──────────────────────────────────────────────────────────
 # Premium: { user_id: (premium_until, cached_at_monotonic) }
