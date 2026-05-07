@@ -1771,7 +1771,32 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if "Message is not modified" not in str(e):
                     print(f"⚠️ Error editing message: {e}")
     
+    elif query.data == 'ignore':
+        # Ignore this callback (used for "Processing..." buttons)
+        return
+        
     elif query.data == 'next_video':
+        # Edit the button to "⏳ Processing..." to prevent multiple clicks
+        try:
+            if query.message.reply_markup and query.message.reply_markup.inline_keyboard:
+                new_keyboard = []
+                changed = False
+                for row in query.message.reply_markup.inline_keyboard:
+                    new_row = []
+                    for btn in row:
+                        if btn.callback_data == 'next_video':
+                            new_row.append(InlineKeyboardButton("⏳ Processing...", callback_data='ignore'))
+                            changed = True
+                        else:
+                            new_row.append(btn)
+                    new_keyboard.append(new_row)
+                
+                if changed:
+                    await query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(new_keyboard))
+        except Exception as e:
+            if "Message is not modified" not in str(e) and "Message can't be edited" not in str(e):
+                print(f"⚠️ Error updating next_video button: {e}")
+
         # Use rate-limited version to prevent overload
         await rate_limited_send_video(
             update,
