@@ -1120,15 +1120,24 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         can_watch = is_premium or user_states[user_id]['hourly_count'] < DAILY_VIDEO_LIMIT
 
         if not can_watch:
-            # Always show Image 2 (Full plans + Ads) whenever limit is reached
+            # Build the keyboard with all premium plans
+            keyboard = []
+            
+            # 1. Add all plans from RZP_PLANS catalogue
+            if RZP_PLANS:
+                for k, v in RZP_PLANS.items():
+                    lbl = v[0]  # First element is the button label
+                    keyboard.append([InlineKeyboardButton(lbl, callback_data=f'rzp_plan_{k}')])
+            
+            # 2. Add Ad links
             aro_url, vp_url = await create_shortened_links(user_id)
-            keyboard = [[InlineKeyboardButton(lbl, callback_data=f'rzp_plan_{k}')]
-                        for k, (lbl, *_) in RZP_PLANS.items()]
             if aro_url:
                 keyboard.append([InlineKeyboardButton("🔥 AroLinks — Watch Ad & Get Premium", url=aro_url)])
             if vp_url:
                 keyboard.append([InlineKeyboardButton("⚡ VPLink — Watch Ad & Get Premium", url=vp_url)])
-            if not aro_url and not vp_url:
+            
+            # 3. Fallback if no links or plans (shouldn't happen)
+            if not keyboard:
                 keyboard.append([InlineKeyboardButton("🔥▶️ Watch Ad → Get FREE Premium! 🎁", callback_data='watch_ad')])
             
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -2795,25 +2804,29 @@ async def check_expired_premiums_job(context: ContextTypes.DEFAULT_TYPE):
                 time_msg = f"{minutes_until_reset} minute(s)"
             
             # Build plan + ad keyboard
-            aro_url, vp_url = await create_shortened_links(uid)
-            keyboard = [[InlineKeyboardButton(lbl, callback_data=f'rzp_plan_{k}')]
-                        for k, (lbl, *_) in RZP_PLANS.items()]
-            if aro_url:
-                keyboard.append([InlineKeyboardButton("🔥 AroLinks — Watch Ad & Get Premium", url=aro_url)])
-            if vp_url:
-                keyboard.append([InlineKeyboardButton("⚡ VPLink — Watch Ad & Get Premium", url=vp_url)])
-            if not aro_url and not vp_url:
-                keyboard.append([InlineKeyboardButton("🔥▶️ Watch Ad → Get FREE Premium! 🎁", callback_data='watch_ad')])
+            keyboard = []
+            if RZP_PLANS:
+                for k, v in RZP_PLANS.items():
+                    keyboard.append({"text": v[0], "callback_data": f"rzp_plan_{k}"})
             
+            aro_url, vp_url = await create_shortened_links(uid)
+            if aro_url:
+                keyboard.append({"text": "🔥 AroLinks — Watch Ad & Get Premium", "url": aro_url})
+            if vp_url:
+                keyboard.append({"text": "⚡ VPLink — Watch Ad & Get Premium", "url": vp_url})
+            
+            if not keyboard:
+                keyboard.append({"text": "🔥▶️ Watch Ad → Get FREE Premium! 🎁", "callback_data": "watch_ad"})
+            
+            # Convert to list of lists (one button per row) for Telegram
+            inline_keyboard = [[btn] for btn in keyboard]
+            reply_markup_dict = {"inline_keyboard": inline_keyboard}
+
             user_text = (
                 "🚫 **Video Limit Reached!**\n\n"
                 "You've used your free video. Buy a plan or watch an ad to continue watching ⬇️\n\n"
                 f"⏳ Next free video in: **{time_msg}**"
             )
-            
-            reply_markup_dict = {
-                "inline_keyboard": [[{"text": btn.text, "callback_data": btn.callback_data} if btn.callback_data else {"text": btn.text, "url": btn.url}] for btn in row] for row in keyboard
-            }
 
             for tk in all_tokens:
                 try:
