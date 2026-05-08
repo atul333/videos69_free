@@ -1907,6 +1907,25 @@ Your message will be forwarded to the admin, and they will reply to you directly
 
 
 
+async def restore_button_callback(context: ContextTypes.DEFAULT_TYPE):
+    """Restore the '▶️ Next' button text after the processing cooldown."""
+    job = context.job
+    data = job.data
+    chat_id = data['chat_id']
+    message_id = data['message_id']
+    original_keyboard = data['original_keyboard']
+    
+    try:
+        await context.bot.edit_reply_markup(
+            chat_id=chat_id,
+            message_id=message_id,
+            reply_markup=InlineKeyboardMarkup(original_keyboard)
+        )
+    except Exception as e:
+        if "Message is not modified" not in str(e) and "Message can't be edited" not in str(e):
+            print(f"⚠️ Error restoring next_video button: {e}")
+
+
 async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle regular messages - Forward to/from admin OR handle menu buttons"""
     # Ignore messages without a user (e.g., channel posts)
