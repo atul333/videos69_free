@@ -1120,55 +1120,7 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         can_watch = is_premium or user_states[user_id]['hourly_count'] < DAILY_VIDEO_LIMIT
 
         if not can_watch:
-            # Check if user had premium that expired
-            if not is_premium and user_states.get(user_id, {}).get('premium_until'):
-                premium_until = user_states[user_id]['premium_until']
-                now = _now_utc()
-                if now >= premium_until:
-                    now_ist = now + _IST_OFFSET
-                    next_reset_ist = (now_ist + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-                    next_reset = next_reset_ist - _IST_OFFSET
-                    time_until_reset = next_reset - now
-                    minutes_until_reset = int(time_until_reset.total_seconds() / 60)
-                    hours_until_reset = int(time_until_reset.total_seconds() / 3600)
-                    if hours_until_reset > 0:
-                        time_msg = f"{hours_until_reset} hour(s) and {minutes_until_reset % 60} minute(s)"
-                    else:
-                        time_msg = f"{minutes_until_reset} minute(s)"
-                    # Build plan + ad keyboard
-                    aro_url, vp_url = await create_shortened_links(user_id)
-                    keyboard = [[InlineKeyboardButton(lbl, callback_data=f'rzp_plan_{k}')]
-                                for k, (lbl, *_) in RZP_PLANS.items()]
-                    if aro_url:
-                        keyboard.append([InlineKeyboardButton("🔥 AroLinks — Watch Ad & Get Premium", url=aro_url)])
-                    if vp_url:
-                        keyboard.append([InlineKeyboardButton("⚡ VPLink — Watch Ad & Get Premium", url=vp_url)])
-                    if not aro_url and not vp_url:
-                        keyboard.append([InlineKeyboardButton("🔥▶️ Watch Ad → Get FREE Premium! 🎁", callback_data='watch_ad')])
-                    reply_markup = InlineKeyboardMarkup(keyboard)
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=f"🚫 **Video Limit Reached!**\n\n"
-                             f"You've used your free video. Buy a plan or watch an ad to continue watching ⬇️\n\n"
-                             f"⏳ Next free video in: **{time_msg}**",
-                        parse_mode='Markdown',
-                        reply_markup=reply_markup
-                    )
-                    return
-
-            # Regular daily limit reached
-            now = _now_utc()
-            now_ist = now + _IST_OFFSET
-            next_reset_ist = (now_ist + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-            next_reset = next_reset_ist - _IST_OFFSET
-            time_until_reset = next_reset - now
-            minutes_until_reset = int(time_until_reset.total_seconds() / 60)
-            hours_until_reset = int(time_until_reset.total_seconds() / 3600)
-            if hours_until_reset > 0:
-                time_msg = f"{hours_until_reset} hour(s) and {minutes_until_reset % 60} minute(s)"
-            else:
-                time_msg = f"{minutes_until_reset} minute(s)"
-            # Build plan + ad keyboard
+            # Always show Image 2 (Full plans + Ads) whenever limit is reached
             aro_url, vp_url = await create_shortened_links(user_id)
             keyboard = [[InlineKeyboardButton(lbl, callback_data=f'rzp_plan_{k}')]
                         for k, (lbl, *_) in RZP_PLANS.items()]
@@ -1178,7 +1130,23 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 keyboard.append([InlineKeyboardButton("⚡ VPLink — Watch Ad & Get Premium", url=vp_url)])
             if not aro_url and not vp_url:
                 keyboard.append([InlineKeyboardButton("🔥▶️ Watch Ad → Get FREE Premium! 🎁", callback_data='watch_ad')])
+            
             reply_markup = InlineKeyboardMarkup(keyboard)
+
+            # Calculate time until next free video reset
+            now = _now_utc()
+            now_ist = now + _IST_OFFSET
+            next_reset_ist = (now_ist + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            next_reset = next_reset_ist - _IST_OFFSET
+            time_until_reset = next_reset - now
+            minutes_until_reset = int(time_until_reset.total_seconds() / 60)
+            hours_until_reset = int(time_until_reset.total_seconds() / 3600)
+            
+            if hours_until_reset > 0:
+                time_msg = f"{hours_until_reset} hour(s) and {minutes_until_reset % 60} minute(s)"
+            else:
+                time_msg = f"{minutes_until_reset} minute(s)"
+
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=f"🚫 **Video Limit Reached!**\n\n"
@@ -1811,6 +1779,91 @@ async def admin_approve_command(update: Update, context: ContextTypes.DEFAULT_TY
                 logger.error(f"Failed to send approve notification to {target_uid} via token {tk[:10]}...: {e}")
 
     print(f"✅ [APPROVE] Admin granted premium for uid={target_uid} for {days} days")
+
+
+async def admin_approve_sec_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin /approvesec <user_id> <seconds> — grant a user premium across ALL bots for specific seconds (testing)."""
+    if not _is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ You are not authorized to use this command.")
+        return
+
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "⚠️ *Usage:* `/approvesec <user_id> <seconds>`\n\n"
+            "*Example:* `/approvesec 7708376300 5`\n\n"
+            "This will grant premium access to the user across ALL bots for a few seconds.",
+            parse_mode='Markdown'
+        )
+        return
+
+    try:
+        target_uid = int(context.args[0])
+        seconds = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text("❌ Invalid arguments. Both user ID and seconds must be numbers.")
+        return
+
+    if seconds <= 0:
+        await update.message.reply_text("❌ Seconds must be greater than 0.")
+        return
+
+    # Grant premium in shared DB
+    from premium_sync import grant_premium_until_synced
+    premium_until = _now_utc() + timedelta(seconds=seconds)
+    await grant_premium_until_synced(target_uid, premium_until)
+
+    # Update local state if the user exists here
+    if target_uid in user_states:
+        user_states[target_uid]['premium_until'] = premium_until
+        save_user_states(user_states, _hint_uid=target_uid)
+
+    # Invalidate membership cache
+    _membership_cache.pop(target_uid, None)
+
+    expiry_local = utc_to_ist(premium_until)
+
+    await update.message.reply_text(
+        f"✅ *Premium Approved (Short)!*\n\n"
+        f"👤 User ID: `{target_uid}`\n"
+        f"⏳ Duration: *{seconds} Seconds*\n"
+        f"⏰ Expires: *{expiry_local.strftime('%I:%M:%S %p IST')}*\n\n"
+        f"Premium access granted across *all bots* temporarily.",
+        parse_mode='Markdown'
+    )
+
+    # Notify user
+    from premium_sync import get_all_bot_tokens
+    all_tokens = await get_all_bot_tokens()
+    if not all_tokens and BOT_TOKEN:
+        all_tokens = [BOT_TOKEN]
+
+    user_text = (
+        f"🎉 **Temporary Premium Access Granted!**\n\n"
+        f"You have been granted **{seconds} seconds** of premium access!\n"
+        f"Enjoy! 🍿"
+    )
+    
+    keyboard = [[InlineKeyboardButton("🎬 Get Video", callback_data='next_video')]]
+    reply_markup_dict = {
+        "inline_keyboard": [[{"text": btn.text, "callback_data": btn.callback_data} for btn in row] for row in keyboard]
+    }
+
+    async with aiohttp.ClientSession() as session:
+        for tk in all_tokens:
+            try:
+                await session.post(
+                    f"https://api.telegram.org/bot{tk}/sendMessage",
+                    json={
+                        "chat_id": target_uid,
+                        "text": user_text,
+                        "parse_mode": "Markdown",
+                        "reply_markup": reply_markup_dict
+                    }
+                )
+            except Exception:
+                pass
+
+    print(f"✅ [APPROVESEC] Admin granted {seconds}s premium to uid={target_uid}")
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2897,6 +2950,7 @@ async def admin_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "👑 *Premium Management*\n"
         "  /checkpremium <uid> — Check if user has active premium\n"
         "  /approve <uid> <days> — Grant premium manually\n"
+        "  /approvesec <uid> <sec> — Grant premium for seconds\n"
         "  /revoke <uid> — Remove premium manually\n\n"
         "ℹ️ *Help*\n"
         "  /adminhelp — Show this help message\n\n"
@@ -3173,6 +3227,7 @@ def main():
         application.add_handler(CommandHandler("payments", admin_payments_command))
         application.add_handler(CommandHandler("revoke", admin_revoke_command))
         application.add_handler(CommandHandler("approve", admin_approve_command))
+        application.add_handler(CommandHandler("approvesec", admin_approve_sec_command))
         application.add_handler(CommandHandler("checkpremium", admin_checkpremium_command))
 
         # Broadcast ConversationHandler in group=-1 (highest priority).
