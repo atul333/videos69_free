@@ -65,9 +65,10 @@ _db_ready = False
 _DDL = """
 -- ── Shared premium table ──────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS shared_premium (
-    user_id       INTEGER PRIMARY KEY,
-    premium_until TEXT,               -- ISO-8601 UTC, NULL = no premium
-    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    user_id           INTEGER PRIMARY KEY,
+    premium_until     TEXT,               -- ISO-8601 UTC, NULL = no premium
+    notified_expired  INTEGER NOT NULL DEFAULT 0,  -- 1 = expiry msg already sent
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_sp_premium
     ON shared_premium(premium_until)
@@ -137,6 +138,13 @@ async def init_premium_sync():
             stmt = stmt.strip()
             if stmt:
                 await db.execute(stmt)
+        # Migrate: add notified_expired column if it doesn't exist yet
+        try:
+            await db.execute(
+                "ALTER TABLE shared_premium ADD COLUMN notified_expired INTEGER NOT NULL DEFAULT 0"
+            )
+        except Exception:
+            pass  # Column already exists — safe to ignore
         await db.commit()
         await db.close()
         _db_ready = True
@@ -262,7 +270,7 @@ async def revoke_premium_synced(user_id: int):
         try:
             db = await _open_db()
             await db.execute(
-                "UPDATE shared_premium SET premium_until=NULL, updated_at=datetime('now') "
+                "UPDATE shared_premium SET premium_until=NULL, notified_expired=0, updated_at=datetime('now') "
                 "WHERE user_id=?", (user_id,)
             )
             await db.commit()
@@ -462,3 +470,56 @@ async def get_total_synced_downloads_today() -> int:
 def invalidate_cache(user_id: int):
     """Force premium cache eviction for a user (no download cache to clear)."""
     _prem_cache.pop(user_id, None)
+
+
+async def claim_expiry_notification(user_id: int) -> bool:
+    """
+    Atomically claim the right to send the 'premium expired' notification.
+    Uses a conditional UPDATE that only succeeds when notified_expired = 0.
+    Returns True if THIS bot should send the notification (first to claim).
+    Returns False if another bot already sent it.
+    
+    This ensures only ONE bot sends the expiry message across all running bots.
+    """
+    if not _db_ready:
+        # No shared DB — always send (single-bot fallback)
+        return True
+    async with _write_lock:
+        try:
+            db = await _open_db()
+            await db.execute(
+                """
+                UPDATE shared_premium
+                SET notified_expired = 1, updated_at = datetime('now')
+                WHERE user_id = ? AND notified_expired = 0
+                """,
+                (user_id,)
+            )
+            rows_changed = db.total_changes
+            await db.commit()
+            await db.close()
+            # Only True if we were the one that flipped 0 → 1
+            return rows_changed > 0
+        except Exception as e:
+            print(f"⚠️ [SharedSync] claim_expiry_notification error uid={user_id}: {e}")
+            return True  # Fail-open: send the message rather than silently drop it
+
+
+async def reset_expiry_notification(user_id: int):
+    """
+    Reset the notified_expired flag when premium is granted again.
+    Called by grant_premium_synced so the user gets the expiry msg next time.
+    """
+    if not _db_ready:
+        return
+    async with _write_lock:
+        try:
+            db = await _open_db()
+            await db.execute(
+                "UPDATE shared_premium SET notified_expired = 0 WHERE user_id = ?",
+                (user_id,)
+            )
+            await db.commit()
+            await db.close()
+        except Exception as e:
+            print(f"⚠️ [SharedSync] reset_expiry_notification error uid={user_id}: {e}")

@@ -48,6 +48,9 @@ from premium_sync import (
     get_total_synced_downloads_today,
     # Bot tokens sync
     register_bot_token,
+    # Expiry notification dedup (ensures only 1 bot sends the message)
+    claim_expiry_notification,
+    reset_expiry_notification,
 )
 
 # Import Razorpay payment integration
@@ -1738,6 +1741,9 @@ async def admin_approve_command(update: Update, context: ContextTypes.DEFAULT_TY
         user_states[target_uid]['premium_until'] = premium_until
         save_user_states(user_states, _hint_uid=target_uid)
 
+    # Reset expiry notification flag so user gets notified next time it expires
+    await reset_expiry_notification(target_uid)
+
     # Invalidate membership cache so next check re-evaluates premium state
     _membership_cache.pop(target_uid, None)
 
@@ -1825,6 +1831,9 @@ async def admin_approve_sec_command(update: Update, context: ContextTypes.DEFAUL
     if target_uid in user_states:
         user_states[target_uid]['premium_until'] = premium_until
         save_user_states(user_states, _hint_uid=target_uid)
+
+    # Reset expiry notification flag so user gets notified next time it expires
+    await reset_expiry_notification(target_uid)
 
     # Invalidate membership cache
     _membership_cache.pop(target_uid, None)
@@ -2783,17 +2792,19 @@ async def send_daily_admin_report(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def check_expired_premiums_job(context: ContextTypes.DEFAULT_TYPE):
-    """Background task to check for newly expired premiums in local state and notify the user."""
+    """Background task: detect newly-expired premiums and notify the user.
+    
+    Each bot sends its own message independently — same as /approvesec behavior
+    where each bot sends 1 message to the user (1 message per bot).
+    """
     now = _now_utc()
     expired_users = []
     
     for uid, state in list(user_states.items()):
         puntil = state.get("premium_until")
         if puntil and now >= puntil:
-            # It just expired!
             expired_users.append(uid)
-            
-            # Clear local state so we don't notify again
+            # Clear local state so this bot doesn't re-detect on next cycle
             state["premium_until"] = None
             save_user_states(user_states, _hint_uid=uid)
             _membership_cache.pop(uid, None)
@@ -2801,65 +2812,50 @@ async def check_expired_premiums_job(context: ContextTypes.DEFAULT_TYPE):
     if not expired_users:
         return
 
-    # Broadcast notification to the user across all registered bots
-    from premium_sync import get_all_bot_tokens
-    all_tokens = await get_all_bot_tokens()
-    
-    if not all_tokens and BOT_TOKEN:
-        all_tokens = [BOT_TOKEN]
+    # Calculate reset time (same for all users in this batch)
+    now_ist = now + _IST_OFFSET
+    next_reset_ist = (now_ist + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    next_reset = next_reset_ist - _IST_OFFSET
+    time_until_reset = next_reset - now
+    minutes_until_reset = int(time_until_reset.total_seconds() / 60)
+    hours_until_reset = int(time_until_reset.total_seconds() / 3600)
+    if hours_until_reset > 0:
+        time_msg = f"{hours_until_reset} hour(s) and {minutes_until_reset % 60} minute(s)"
+    else:
+        time_msg = f"{minutes_until_reset} minute(s)"
 
-    async with aiohttp.ClientSession() as session:
-        for uid in expired_users:
-            # Calculate time until next free video reset
-            now_ist = now + _IST_OFFSET
-            next_reset_ist = (now_ist + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-            next_reset = next_reset_ist - _IST_OFFSET
-            time_until_reset = next_reset - now
-            minutes_until_reset = int(time_until_reset.total_seconds() / 60)
-            hours_until_reset = int(time_until_reset.total_seconds() / 3600)
-            if hours_until_reset > 0:
-                time_msg = f"{hours_until_reset} hour(s) and {minutes_until_reset % 60} minute(s)"
-            else:
-                time_msg = f"{minutes_until_reset} minute(s)"
-            
+    # Each bot sends its own message to the user (1 per bot, same as /approvesec)
+    for uid in expired_users:
+        try:
             # Build plan + ad keyboard
             keyboard = []
             if RZP_PLANS:
                 for k, v in RZP_PLANS.items():
-                    keyboard.append({"text": v[0], "callback_data": f"rzp_plan_{k}"})
+                    keyboard.append([InlineKeyboardButton(v[0], callback_data=f'rzp_plan_{k}')])
             
             aro_url, vp_url = await create_shortened_links(uid)
             if aro_url:
-                keyboard.append({"text": "🔥 AroLinks — Watch Ad & Get Premium", "url": aro_url})
+                keyboard.append([InlineKeyboardButton("🔥 AroLinks — Watch Ad & Get Premium", url=aro_url)])
             if vp_url:
-                keyboard.append({"text": "⚡ VPLink — Watch Ad & Get Premium", "url": vp_url})
-            
+                keyboard.append([InlineKeyboardButton("⚡ VPLink — Watch Ad & Get Premium", url=vp_url)])
             if not keyboard:
-                keyboard.append({"text": "🔥▶️ Watch Ad → Get FREE Premium! 🎁", "callback_data": "watch_ad"})
-            
-            # Convert to list of lists (one button per row) for Telegram
-            inline_keyboard = [[btn] for btn in keyboard]
-            reply_markup_dict = {"inline_keyboard": inline_keyboard}
+                keyboard.append([InlineKeyboardButton("🔥▶️ Watch Ad → Get FREE Premium! 🎁", callback_data='watch_ad')])
 
             user_text = (
-                "🚫 **Video Limit Reached!**\n\n"
-                "You've used your free video. Buy a plan or watch an ad to continue watching ⬇️\n\n"
+                "🚫 **Your Premium Has Expired!**\n\n"
+                "Renew now to keep watching unlimited videos ⬇️\n\n"
                 f"⏳ Next free video in: **{time_msg}**"
             )
 
-            for tk in all_tokens:
-                try:
-                    await session.post(
-                        f"https://api.telegram.org/bot{tk}/sendMessage",
-                        json={
-                            "chat_id": uid,
-                            "text": user_text,
-                            "parse_mode": "Markdown",
-                            "reply_markup": reply_markup_dict
-                        }
-                    )
-                except Exception:
-                    pass  # User might have blocked the bot
+            await context.bot.send_message(
+                chat_id=uid,
+                text=user_text,
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            print(f"🔔 [expiry] uid={uid} notified via {context.bot.username}")
+        except Exception as e:
+            print(f"⚠️ [expiry] Failed to notify uid={uid}: {e}")
 
 
 async def admin_video_likes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
