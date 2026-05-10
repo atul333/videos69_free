@@ -45,7 +45,7 @@ RZP_HOURS  = int(os.getenv("RZP_PREMIUM_HOURS",  "720"))
 # Unicode U+0336 = COMBINING LONG STROKE OVERLAY (strikethrough on prev char)
 # key → (button_label, hours, amount_paise, plan_name, rzp_description)
 PLANS: dict[str, tuple] = {
-    "lifetime": ("\U0001f39f\ufe0f Lifetime Premium \u2014 \u20b91\u03369\u03369\u0336 \u20b999 [50% OFF \u23f3 Limited Time!]", 87600, 9900, "Lifetime Premium", "Videos Bot \u2014 Lifetime Unlimited"),
+    "lifetime": ("\U0001f525\U0001f48e Lifetime Premium \u2014 \u20b91\u03369\u03369\u0336 \u20b999 [50% OFF]", 87600, 9900, "Lifetime Premium", "Videos Bot \u2014 Lifetime Unlimited"),
     "1d":       ("\u26a1 1 Day \U0001f512 Unlimited Videos \u2014 \u20b91",         24,    100,  "1 Day Premium",    "Videos Bot \u2014 1 Day Unlimited"),
     "3d":       ("\U0001f525 3 Days \u2014 \u20b9\u03363\u0336 \u20b92 [33% OFF]",  72,    200,  "3 Day Premium",    "Videos Bot \u2014 3 Days Unlimited"),
     "5d":       ("\U0001f4a0 5 Days \u2014 \u20b9\u03365\u0336 \u20b93 [40% OFF]",  120,   300,  "5 Day Premium",    "Videos Bot \u2014 5 Days Unlimited"),
