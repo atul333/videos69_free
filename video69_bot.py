@@ -152,7 +152,7 @@ PREMIUM_DURATION_HOURS = 12
 # Number of videos that can be downloaded/saved by normal users (every 24 hours)
 DOWNLOADABLE_VIDEOS_LIMIT = 1
 # Number of videos that can be downloaded by premium users (every 24 hours)
-PREMIUM_DOWNLOADABLE_VIDEOS_LIMIT = 20
+PREMIUM_DOWNLOADABLE_VIDEOS_LIMIT = 100
 
 # AroLinks URL Shortener API Configuration
 AROLINK_API_TOKEN = "cf0c76a4739d65e08d5990b0db1865b680f1de4a"
@@ -993,7 +993,7 @@ async def broadcast_daily_reset(context: ContextTypes.DEFAULT_TYPE):
             f"**FREE Premium Access** to ALL users for the entire day!\n\n"
             f"⭐ **What you get TODAY — absolutely FREE:**\n"
             f"• 🔓 **Unlimited videos** all day long\n"
-            f"• 📥 **20 downloads** today\n"
+            f"• 📥 **100 downloads** today\n"
             f"• ⏰ Valid till **11:59 PM IST tonight**\n\n"
             f"⚠️ **From May 2 onwards**, regular limits resume.\n"
             f"Watch an ad anytime to unlock premium again!\n\n"
@@ -1033,9 +1033,9 @@ async def broadcast_daily_reset(context: ContextTypes.DEFAULT_TYPE):
             f"✨ Your limits have been renewed!\n"
             f"🎥 You can now watch **3 free videos**\n"
             f"📥 You can download **2 videos**\n"
-            f"💎 Premium users get **20 downloads**!\n\n"
+            f"💎 Premium users get **100 downloads**!\n\n"
             f"⏱️ Limits reset every **24 hours at midnight**\n"
-            f"💎 Want unlimited videos + 20 downloads? Watch an ad!\n\n"
+            f"💎 Want unlimited videos + 100 downloads? Watch an ad!\n\n"
             f"Click below to start watching!\n\n"
             f"Enjoy! 🍿"
         )
@@ -1214,9 +1214,9 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                         caption_text = (
                             f"👆 Enjoy the video!\n\n"
                             f"🔒 Download limit reached ({download_limit} video).\n\n"
-                            f"💎 Want 20 downloads per day?\n"
+                            f"💎 Want 100 downloads per day?\n"
                             f"Watch an ad for Premium Access:\n"
-                            f"✅ Unlimited videos + 20 downloads!\n\n"
+                            f"✅ Unlimited videos + 100 downloads!\n\n"
                             f"⚠️ This video will be deleted after 20 minutes."
                         )
 
@@ -1540,7 +1540,7 @@ async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📱 *Scan QR or tap the button below to pay*\n\n"
                 f"💎 *{days}-Day Premium Plan — ₹{amount_inr:.0f}*\n\n"
                 f"✅ Unlimited videos for *{days} days*\n"
-                f"✅ *20 downloads* per day\n"
+                f"✅ *100 downloads* per day\n"
                 f"✅ Works across *all our bots*\n\n"
                 f"🔒 *Safe & secure* — powered by Razorpay\n\n"
                 f"⚡ Premium activates *automatically* within seconds of payment!"
@@ -1553,7 +1553,7 @@ async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"💎 *{days}-Day Premium — ₹{amount_inr:.0f}*\n\n"
             f"✅ Unlimited videos for *{days} days*\n"
-            f"✅ *20 downloads* per day\n"
+            f"✅ *100 downloads* per day\n"
             f"✅ Works across *all our bots*\n\n"
             f"⚡ Premium activates *automatically* after payment!",
             parse_mode='Markdown',
@@ -2120,7 +2120,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "💎 **Unlock Premium Access!**\n\n"
                 "Get premium benefits:\n"
                 "✅ **Unlimited** video watching\n"
-                "✅ **20 downloads** per day (10x more!)\n"
+                "✅ **100 downloads** per day (10x more!)\n"
                 "✅ **12 hours** of premium access\n\n"
                 "Click the button below to watch an ad and unlock premium! 🚀",
                 parse_mode='Markdown',
@@ -2133,7 +2133,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text="💎 **Unlock Premium Access!**\n\n"
                      "Get premium benefits:\n"
                      "✅ **Unlimited** video watching\n"
-                     "✅ **20 downloads** per day (10x more!)\n"
+                     "✅ **100 downloads** per day (10x more!)\n"
                      "✅ **12 hours** of premium access\n\n"
                      "Click the button below to watch an ad and unlock premium! 🚀",
                 parse_mode='Markdown',
@@ -2215,7 +2215,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if downloaded_count >= download_limit:
                 # Show different messages for premium vs free users
                 if is_premium:
-                    # Premium user reached their 20 download limit
+                    # Premium user reached their 100 download limit
                     await context.bot.send_message(
                         chat_id=query.message.chat_id,
                         text="❌ **Download Limit Reached!**\n\n"
@@ -2235,7 +2235,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                              "💎 **Want More Downloads?**\n"
                              "Watch an ad to get Premium Access:\n\n"
                              "✅ **Unlimited** video watching\n"
-                             "✅ **20 downloads** per day (20x more!)\n"
+                             "✅ **100 downloads** per day (20x more!)\n"
                              "✅ **12 hours** of premium access\n\n"
                              "⏱️ Limits reset every **24 hours at midnight (12:00 AM IST)**\n\n"
                              "Click below to watch an ad and unlock premium! 🚀",
