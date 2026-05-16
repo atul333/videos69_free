@@ -2791,6 +2791,202 @@ async def send_daily_admin_report(context: ContextTypes.DEFAULT_TYPE):
         print(f"⚠️ Daily admin report failed: {e}")
 
 
+async def admin_buypattern_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only: /buypattern — buying behaviour analytics from rzp_payments DB."""
+    if not _is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Not authorized.")
+        return
+
+    await update.message.reply_text("📊 Analysing buying patterns… please wait.")
+
+    SHARED_DB = os.getenv("SHARED_PREMIUM_DB", "/home/ubuntu/premium_shared.db")
+    try:
+        async with aiosqlite.connect(SHARED_DB) as db:
+            db.row_factory = aiosqlite.Row
+
+            # ── 1. Overall totals ──────────────────────────────────────────────
+            async with db.execute(
+                "SELECT COUNT(*) total, COUNT(DISTINCT user_id) users, "
+                "SUM(amount_paise) revenue FROM rzp_payments WHERE status='paid'"
+            ) as cur:
+                tot = dict(await cur.fetchone() or {})
+
+            total_txns   = tot.get("total", 0) or 0
+            total_users  = tot.get("users", 0) or 0
+            total_rev    = (tot.get("revenue", 0) or 0) / 100  # paise → ₹
+
+            # ── 2. Repeat buyers ───────────────────────────────────────────────
+            async with db.execute(
+                "SELECT user_id, COUNT(*) n FROM rzp_payments WHERE status='paid' "
+                "GROUP BY user_id ORDER BY n DESC"
+            ) as cur:
+                user_counts = [dict(r) for r in await cur.fetchall()]
+
+            single_buyers  = sum(1 for r in user_counts if r["n"] == 1)
+            repeat_buyers  = sum(1 for r in user_counts if r["n"] >= 2)
+            power_buyers   = sum(1 for r in user_counts if r["n"] >= 5)
+            max_buys       = max((r["n"] for r in user_counts), default=0)
+            avg_buys       = (sum(r["n"] for r in user_counts) / len(user_counts)) if user_counts else 0
+
+            # ── 3. Plan popularity ─────────────────────────────────────────────
+            async with db.execute(
+                "SELECT plan_key, plan_name, COUNT(*) n, SUM(amount_paise) rev "
+                "FROM rzp_payments WHERE status='paid' "
+                "GROUP BY plan_key ORDER BY n DESC"
+            ) as cur:
+                plan_rows = [dict(r) for r in await cur.fetchall()]
+
+            # ── 4. Top 5 spenders ──────────────────────────────────────────────
+            async with db.execute(
+                "SELECT user_id, COUNT(*) txns, SUM(amount_paise) spent "
+                "FROM rzp_payments WHERE status='paid' "
+                "GROUP BY user_id ORDER BY spent DESC LIMIT 5"
+            ) as cur:
+                top_spenders = [dict(r) for r in await cur.fetchall()]
+
+            # ── 5. Daily revenue trend (last 14 days) ─────────────────────────
+            async with db.execute(
+                "SELECT DATE(paid_at) day, COUNT(*) txns, SUM(amount_paise) rev "
+                "FROM rzp_payments WHERE status='paid' "
+                "AND paid_at >= datetime('now', '-14 days') "
+                "GROUP BY DATE(paid_at) ORDER BY day DESC"
+            ) as cur:
+                daily = [dict(r) for r in await cur.fetchall()]
+
+            # ── 6. Time-to-repurchase (avg hours between purchases per user) ───
+            async with db.execute(
+                "SELECT user_id, MIN(paid_at) first_buy, MAX(paid_at) last_buy, COUNT(*) n "
+                "FROM rzp_payments WHERE status='paid' "
+                "GROUP BY user_id HAVING n >= 2"
+            ) as cur:
+                repurchase_rows = [dict(r) for r in await cur.fetchall()]
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ DB error: {e}")
+        return
+
+    now_ist = (_now_utc() + _IST_OFFSET).strftime("%d %b %Y %I:%M %p")
+
+    # ── Build Message 1: Overview ─────────────────────────────────────────────
+    msg1 = (
+        f"📊 *Buying Pattern Report*\n"
+        f"⏰ `{now_ist} IST`\n"
+        f"{'━' * 30}\n\n"
+        f"💰 *Revenue:* ₹`{total_rev:.0f}`\n"
+        f"🧾 *Total Transactions:* `{total_txns}`\n"
+        f"👥 *Unique Buyers:* `{total_users}`\n"
+        f"🔁 *Repeat Buyers (2+):* `{repeat_buyers}` "
+        f"({(repeat_buyers/total_users*100):.0f}% of buyers)\n"
+        f"🔥 *Power Buyers (5+):* `{power_buyers}`\n"
+        f"📈 *Avg Purchases/User:* `{avg_buys:.1f}`\n"
+        f"🏆 *Max by 1 User:* `{max_buys}` purchases\n"
+        f"1️⃣ *One-time Buyers:* `{single_buyers}`\n"
+    )
+    await update.message.reply_text(msg1, parse_mode="Markdown")
+
+    # ── Build Message 2: Plan Popularity ─────────────────────────────────────
+    plan_lines = ""
+    for r in plan_rows:
+        pct = (r["n"] / total_txns * 100) if total_txns else 0
+        rev_inr = (r["rev"] or 0) / 100
+        bar = "🟩" * int(pct / 10) + "⬜" * (10 - int(pct / 10))
+        plan_lines += (
+            f"  *{r['plan_name']}* (`{r['plan_key']}`)\n"
+            f"  {bar} `{r['n']}` sales · ₹`{rev_inr:.0f}` revenue · `{pct:.0f}%`\n\n"
+        )
+
+    msg2 = (
+        f"🛒 *Plan Popularity*\n"
+        f"{'━' * 30}\n\n"
+        f"{plan_lines.strip()}"
+    )
+    await update.message.reply_text(msg2, parse_mode="Markdown")
+
+    # ── Build Message 3: Top Spenders ────────────────────────────────────────
+    spender_lines = ""
+    for i, r in enumerate(top_spenders, 1):
+        spender_lines += (
+            f"  {i}\\. `{r['user_id']}` — ₹`{(r['spent'] or 0)/100:.0f}` "
+            f"in `{r['txns']}` purchases\n"
+        )
+
+    msg3 = (
+        f"🏅 *Top 5 Spenders*\n"
+        f"{'━' * 30}\n\n"
+        f"{spender_lines.strip()}"
+    )
+    await update.message.reply_text(msg3, parse_mode="Markdown")
+
+    # ── Build Message 4: Daily Trend ─────────────────────────────────────────
+    daily_lines = ""
+    for r in daily[:10]:
+        rev_inr = (r["rev"] or 0) / 100
+        daily_lines += f"  `{r['day']}` — `{r['txns']}` sales · ₹`{rev_inr:.0f}`\n"
+
+    msg4 = (
+        f"📅 *Last 14 Days Revenue Trend*\n"
+        f"{'━' * 30}\n\n"
+        f"{daily_lines.strip() or 'No data in last 14 days.'}"
+    )
+    await update.message.reply_text(msg4, parse_mode="Markdown")
+
+    # ── Build Message 5: Insights & Scaling Advice ───────────────────────────
+    # Compute repeat rate, best plan, avg time-between-purchases
+    repeat_rate = (repeat_buyers / total_users * 100) if total_users else 0
+    best_plan = plan_rows[0]["plan_name"] if plan_rows else "N/A"
+    best_rev_plan = sorted(plan_rows, key=lambda x: x["rev"] or 0, reverse=True)
+    best_rev_plan_name = best_rev_plan[0]["plan_name"] if best_rev_plan else "N/A"
+
+    # Avg days between first and last purchase for repeat buyers
+    avg_days_between = 0.0
+    if repurchase_rows:
+        from datetime import datetime as _dt
+        deltas = []
+        for r in repurchase_rows:
+            try:
+                f = _dt.fromisoformat(r["first_buy"].replace("Z", "+00:00"))
+                l = _dt.fromisoformat(r["last_buy"].replace("Z", "+00:00"))
+                days = (l - f).total_seconds() / 86400
+                if days > 0:
+                    deltas.append(days / (r["n"] - 1))
+            except Exception:
+                pass
+        avg_days_between = sum(deltas) / len(deltas) if deltas else 0
+
+    insights = []
+    if repeat_rate >= 40:
+        insights.append("✅ *High repeat rate* — users love the product. Push Lifetime plan harder.")
+    elif repeat_rate >= 20:
+        insights.append("⚡ *Moderate repeat rate* — users return but slowly. Improve urgency in upsell.")
+    else:
+        insights.append("⚠️ *Low repeat rate* — users not returning. Improve content quality & notifications.")
+
+    if avg_days_between > 0:
+        insights.append(f"🔄 Users rebuy every *~{avg_days_between:.0f} days* on average — schedule reminders at this interval.")
+
+    lifetime_sales = next((r["n"] for r in plan_rows if "lifetime" in r["plan_key"].lower() and "loyalty" not in r["plan_key"]), 0)
+    temp_sales = total_txns - lifetime_sales
+    if lifetime_sales < temp_sales * 0.1:
+        insights.append("💎 *Lifetime plan underperforming* — increase upsell frequency and lower intro price.")
+    else:
+        insights.append("💎 *Lifetime plan converting well* — maintain current upsell strategy.")
+
+    if total_users > 0 and total_rev / total_users < 10:
+        insights.append(f"📉 *Avg revenue/user = ₹{total_rev/total_users:.1f}* — low. Push higher-tier plans.")
+    else:
+        insights.append(f"📈 *Avg revenue/user = ₹{total_rev/total_users:.1f}* — healthy. Scale ad spend.")
+
+    insights.append(f"🎯 *Most popular plan:* {best_plan} | *Most revenue:* {best_rev_plan_name}")
+    insights.append("🚀 *Scale strategy:* Run paid ads → free video hook → limit hit → premium upsell → lifetime offer.")
+
+    msg5 = (
+        f"💡 *Business Insights & Scaling Advice*\n"
+        f"{'━' * 30}\n\n"
+        + "\n\n".join(insights)
+    )
+    await update.message.reply_text(msg5, parse_mode="Markdown")
+
+
 async def check_expired_premiums_job(context: ContextTypes.DEFAULT_TYPE):
     """Background task: detect newly-expired premiums and notify the user.
     
@@ -3257,6 +3453,8 @@ def main():
         application.add_handler(CommandHandler("approve", admin_approve_command))
         application.add_handler(CommandHandler("approvesec", admin_approve_sec_command))
         application.add_handler(CommandHandler("checkpremium", admin_checkpremium_command))
+        application.add_handler(CommandHandler("buypattern", admin_buypattern_command))
+
 
         # Broadcast ConversationHandler in group=-1 (highest priority).
         # MUST be group=-1, not group=0. Reason:
