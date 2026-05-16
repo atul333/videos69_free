@@ -50,7 +50,10 @@ PLANS: dict[str, tuple] = {
     "3d":       ("\U0001f525\u2b50 3 Days \u2014 \u20b9\u03363\u0336 \u20b92 [33% OFF]",   72,    200,  "3 Day Premium",    "Videos Bot \u2014 3 Days Unlimited"),
     "5d":       ("\U0001f4a5\U0001f4b0 5 Days \u2014 \u20b9\u03365\u0336 \u20b93 [40% OFF]", 120,   300,  "5 Day Premium",    "Videos Bot \u2014 5 Days Unlimited"),
     "10d":      ("\U0001f3c6\U0001f451 10 Days \u2014 \u20b9\u03361\u03360\u0336 \u20b95 [50% OFF]", 240, 500, "10 Day Premium", "Videos Bot \u2014 10 Days Unlimited"),
+    # ── TEST ONLY — delete after testing ──────────────────────────────────────
+    "2m":       ("\U0001f9ea 2 Min TEST \u2014 \u20b91", 2/60, 100, "2 Min Test", "Videos Bot \u2014 2 Min Test"),
 }
+
 
 
 RZP_PL_URL    = "https://api.razorpay.com/v1/payment_links"
