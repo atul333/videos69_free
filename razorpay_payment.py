@@ -52,7 +52,7 @@ PLANS: dict[str, tuple] = {
     "10d":              ("\U0001f3c6\U0001f451 10 Days \u2014 \u20b9\u03361\u03360\u0336 \u20b95 [50% OFF]", 240, 500, "10 Day Premium", "Videos Bot \u2014 10 Days Unlimited"),
     # ── Hidden loyalty plan — ₹49 for returning buyers via upsell button only ──
     # NOT shown in normal plan keyboards. Only reachable via the upsell button.
-    "lifetime_loyalty": ("\U0001f6a8\U0001f48e Lifetime \u2014 \u20b91\u03369\u03369\u0336 \u20b949 [Special Offer]", 87600, 4900, "Lifetime Premium", "Videos Bot \u2014 Lifetime Unlimited"),
+    "lifetime_loyalty": ("\U0001f6a8\U0001f48e Lifetime \u2014 \u20b91\u03369\u03369\u0336 \u20b949 [75% OFF \u2014 Special Offer]", 87600, 4900, "Lifetime Premium", "Videos Bot \u2014 Lifetime Unlimited"),
     # ── TEST ONLY — delete after testing ──────────────────────────────────────
     "2m":               ("\U0001f9ea 2 Min TEST \u2014 \u20b91", 2/60, 100, "2 Min Test", "Videos Bot \u2014 2 Min Test"),
 }
