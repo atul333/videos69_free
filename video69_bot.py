@@ -3020,20 +3020,19 @@ async def check_expired_premiums_job(context: ContextTypes.DEFAULT_TYPE):
     else:
         time_msg = f"{minutes_until_reset} minute(s)"
 
+    # Hidden plan keys — must NOT appear in the expiry keyboard
+    _HIDDEN_PLAN_KEYS = {"lifetime_loyalty", "2m"}
+
     # Each bot sends its own message to the user (1 per bot, same as /approvesec)
     for uid in expired_users:
         try:
-            # Build plan + ad keyboard
+            # Build renewal keyboard — paid plan buttons only (no ad links, no hidden plans)
             keyboard = []
             if RZP_PLANS:
                 for k, v in RZP_PLANS.items():
+                    if k in _HIDDEN_PLAN_KEYS:
+                        continue
                     keyboard.append([InlineKeyboardButton(v[0], callback_data=f'rzp_plan_{k}')])
-            
-            aro_url, vp_url = await create_shortened_links(uid)
-            if aro_url:
-                keyboard.append([InlineKeyboardButton("🔥 AroLinks — Watch Ad & Get Premium", url=aro_url)])
-            if vp_url:
-                keyboard.append([InlineKeyboardButton("⚡ VPLink — Watch Ad & Get Premium", url=vp_url)])
             if not keyboard:
                 keyboard.append([InlineKeyboardButton("🔥▶️ Watch Ad → Get FREE Premium! 🎁", callback_data='watch_ad')])
 
@@ -3050,6 +3049,33 @@ async def check_expired_premiums_job(context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
             print(f"🔔 [expiry] uid={uid} notified via {context.bot.username}")
+
+            # ── ₹49 Lifetime exclusive offer — sent right after expiry message ──
+            # HTML parse_mode so <s>₹199</s> strikethrough renders in all Telegram clients
+            offer_text = (
+                "🚨 <b>EXCLUSIVE OFFER — Just for You!</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "💎 <b>Lifetime Premium</b> — <s>₹199</s> <b>only ₹49!</b>\n\n"
+                "✅ Unlimited videos <b>forever</b>\n"
+                "✅ No renewals, no limits\n"
+                "✅ One payment, lifetime access\n\n"
+                "⏳ <b>Limited time offer — grab it before it's gone!</b>\n\n"
+                "👇 <b>Tap below to upgrade NOW at ₹49!</b>"
+            )
+            offer_keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "🚨💎 Lifetime — ₹199 → ₹49 — Grab Now!",
+                    callback_data="rzp_plan_lifetime_loyalty"
+                )
+            ]])
+            await context.bot.send_message(
+                chat_id=uid,
+                text=offer_text,
+                parse_mode='HTML',
+                reply_markup=offer_keyboard
+            )
+            print(f"💡 [expiry-upsell] ₹49 offer sent to uid={uid}")
+
         except Exception as e:
             print(f"⚠️ [expiry] Failed to notify uid={uid}: {e}")
 
