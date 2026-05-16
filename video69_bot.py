@@ -1126,9 +1126,12 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             # Build the keyboard with all premium plans
             keyboard = []
             
-            # 1. Add all plans from RZP_PLANS catalogue
+            # 1. Add all plans from RZP_PLANS catalogue (skip hidden/loyalty plans)
+            _HIDDEN = {"lifetime_loyalty", "2m"}
             if RZP_PLANS:
                 for k, v in RZP_PLANS.items():
+                    if k in _HIDDEN:
+                        continue
                     lbl = v[0]  # First element is the button label
                     keyboard.append([InlineKeyboardButton(lbl, callback_data=f'rzp_plan_{k}')])
             
