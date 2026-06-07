@@ -3054,11 +3054,11 @@ async def check_expired_premiums_job(context: ContextTypes.DEFAULT_TYPE):
             print(f"🔔 [expiry] uid={uid} notified via {context.bot.username}")
 
             # ── ₹49 Lifetime exclusive offer — sent right after expiry message ──
-            # HTML parse_mode so <s>₹199</s> strikethrough renders in all Telegram clients
+            # HTML parse_mode so <s>₹99</s> strikethrough renders in all Telegram clients
             offer_text = (
                 "🚨 <b>EXCLUSIVE OFFER — Just for You!</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n\n"
-                "💎 <b>Lifetime Premium</b> — <s>₹199</s> <b>only ₹49!</b>\n\n"
+                "💎 <b>Lifetime Premium</b> — <s>₹99</s> <b>only ₹49!</b>\n\n"
                 "✅ Unlimited videos <b>forever</b>\n"
                 "✅ No renewals, no limits\n"
                 "✅ One payment, lifetime access\n\n"
@@ -3067,7 +3067,7 @@ async def check_expired_premiums_job(context: ContextTypes.DEFAULT_TYPE):
             )
             offer_keyboard = InlineKeyboardMarkup([[
                 InlineKeyboardButton(
-                    "\U0001f525\U0001f48e Lifetime \u2014 \u20b91\u03369\u03369\u0336 \u27a1\ufe0f \u20b949 \u2014 75% OFF \u2014 Grab Now!",
+                    "\U0001f525\U0001f48e Lifetime \u2014 \u20b99\u03369\u03369\u0336 \u27a1\ufe0f \u20b949 \u2014 50% OFF \u2014 Grab Now!",
                     callback_data="rzp_plan_lifetime_loyalty"
                 )
             ]])
