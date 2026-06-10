@@ -3067,7 +3067,7 @@ async def check_expired_premiums_job(context: ContextTypes.DEFAULT_TYPE):
             )
             offer_keyboard = InlineKeyboardMarkup([[
                 InlineKeyboardButton(
-                    "\U0001f525\U0001f48e Lifetime \u2014 \u20b99\u03369\u03369\u0336 \u27a1\ufe0f \u20b949 \u2014 50% OFF \u2014 Grab Now!",
+                    "\U0001f525\U0001f48e Lifetime \u2014 \u20b9\u03369\u03369\u0336 \u27a1\ufe0f \u20b949 \u2014 50% OFF \u2014 Grab Now!",
                     callback_data="rzp_plan_lifetime_loyalty"
                 )
             ]])
