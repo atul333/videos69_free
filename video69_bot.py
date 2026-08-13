@@ -1164,9 +1164,20 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"🚫 **Video Limit Reached!**\n\n"
-                     f"You've used your free video. Buy a plan or watch an ad to continue watching ⬇️\n\n"
-                     f"⏳ Next free video in: **{time_msg}**",
+                text=(
+                    "🚫 *Video Limit Reached!*\n\n"
+                    "You've used your free video for today.\n\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n"
+                    "💎 *Upgrade to Premium & Get:*\n\n"
+                    "🎬 Unlimited Video Watching\n"
+                    "📥 100 Downloads Per Day\n"
+                    "⚡ Instant Access — No Waiting\n"
+                    "🔓 No Daily Limits Ever\n"
+                    "🌟 Ad-Free Experience\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "🔥 Plans start at just *₹3!*\n"
+                    "👇 Buy a plan or watch an ad to continue"
+                ),
                 parse_mode='Markdown',
                 reply_markup=reply_markup
             )
@@ -1238,8 +1249,6 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                     if not is_premium:
                         keyboard.append([InlineKeyboardButton("🔥▶️ Watch Ad → Get FREE Premium! 🎁", callback_data='watch_ad')])
                 keyboard.append([InlineKeyboardButton("▶️ Next", callback_data='next_video')])
-                if not is_premium:
-                    keyboard.append([InlineKeyboardButton("🔓 Unlock Premium", callback_data='unlock_premium')])
                 reply_markup = InlineKeyboardMarkup(keyboard)
 
                 # ── SINGLE API CALL: video + caption + buttons in one request ──
