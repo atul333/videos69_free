@@ -27,24 +27,26 @@ DEFAULT_BOTS_DATA = {
     "seen_users": []
 }
 
-# Attractive, distinct emoji badges for bots
+# Distinct single emojis for bots (no words, no brackets, single clean emoji per bot)
 UNIQUE_BOT_EMOJIS = [
-    "( ⚡ FASTEST ) ( 🚀 )",
-    "( 🔥 ACTIVE ) ( ⚡ )",
-    "( 💎 VIP ) ( ✨ )",
-    "( 🚀 ULTRA ) ( 🎯 )",
-    "( 👑 PREMIUM ) ( 🔥 )",
-    "( 🌟 HD ) ( ⚡ )",
-    "( 🔮 TURBO ) ( 💎 )",
-    "( 💫 SPEED ) ( 🚀 )",
-    "( 🍿 MAX ) ( ⚡ )",
-    "( 🏆 BEST ) ( ✨ )",
-    "( 🎯 DIRECT ) ( 🔥 )",
-    "( 🌀 PRO ) ( 💎 )",
-    "( 🛡️ SECURE ) ( ⚡ )",
-    "( 🤖 AUTO ) ( 🚀 )",
-    "( 💥 POWER ) ( 🔥 )",
-    "( ✨ SPECIAL ) ( 👑 )"
+    "⚡",
+    "🔥",
+    "💎",
+    "🚀",
+    "👑",
+    "🌟",
+    "🎯",
+    "🔮",
+    "💫",
+    "🍿",
+    "🏆",
+    "🌀",
+    "🛡️",
+    "🤖",
+    "💥",
+    "✨",
+    "🎬",
+    "🌈"
 ]
 
 # In-memory cache of forward map: admin-side fwd_message_id -> original user_id
@@ -193,8 +195,8 @@ def format_bots_message(extra_top_msg: str = "", extra_bottom_msg: str = "") -> 
             if not uname.startswith("@"):
                 uname = f"@{uname}"
 
-            # Assign unique attractive emoji if empty or generic default tag
-            if not tag or tag in ["( 👨‍💻 )", "( 👨💻 )"]:
+            # Clean emoji: if tag is empty or has brackets/words, use single clean emoji
+            if not tag or "(" in tag or ")" in tag:
                 tag = UNIQUE_BOT_EMOJIS[(idx - 1) % len(UNIQUE_BOT_EMOJIS)]
 
             lines.append(f"{idx}. {uname} {tag}")
@@ -298,10 +300,11 @@ async def addbot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
             "⚠️ <b>Usage:</b>\n"
-            "<code>/addbot @bot_username [tag]</code>\n\n"
+            "<code>/addbot @bot_username [emoji]</code>\n\n"
             "<b>Examples:</b>\n"
-            "<code>/addbot @Videos1_69_bot ( 🆕 ) ( ⚡ )</code>\n"
-            "<code>/addbot @Videos2_69_bot</code>",
+            "<code>/addbot @Videos1_69_bot ⚡</code>\n"
+            "<code>/addbot @Videos2_69_bot 🔥</code>\n"
+            "<code>/addbot @Videos3_69_bot</code> <i>(auto-assigns distinct emoji)</i>",
             parse_mode='HTML'
         )
         return
@@ -347,9 +350,9 @@ async def replacebot_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if len(context.args) < 2:
         await update.message.reply_text(
             "⚠️ <b>Usage:</b>\n"
-            "<code>/replacebot @old_bot @new_bot [tag]</code>\n\n"
+            "<code>/replacebot @old_bot @new_bot [emoji]</code>\n\n"
             "<b>Example:</b>\n"
-            "<code>/replacebot @old_bot @new_bot ( 🆕 ) ( ⚡ )</code>",
+            "<code>/replacebot @old_bot @new_bot ⚡</code>",
             parse_mode='HTML'
         )
         return
