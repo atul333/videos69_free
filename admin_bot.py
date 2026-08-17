@@ -23,9 +23,29 @@ DEFAULT_BOTS_DATA = {
     "header": "♨️ <b>Videos69 Working Bots List</b> 🤖",
     "channel_link": "https://t.me/+4vOykznly3A3ZDQ0",
     "bots": [],
-    "footer": "Dear users aap inme se kisi bhi bot se unlimited videos access kr sakte hai. Jo bot band ho uska report hame yahan message kr dia kijie 👍",
+    "footer": "💡 <i>Dear users aap inme se kisi bhi bot se unlimited videos access kr sakte hai. Jo bot band ho uska report hame yahan message kr dia kijie 👍</i>",
     "seen_users": []
 }
+
+# Attractive, distinct emoji badges for bots
+UNIQUE_BOT_EMOJIS = [
+    "( ⚡ FASTEST ) ( 🚀 )",
+    "( 🔥 ACTIVE ) ( ⚡ )",
+    "( 💎 VIP ) ( ✨ )",
+    "( 🚀 ULTRA ) ( 🎯 )",
+    "( 👑 PREMIUM ) ( 🔥 )",
+    "( 🌟 HD ) ( ⚡ )",
+    "( 🔮 TURBO ) ( 💎 )",
+    "( 💫 SPEED ) ( 🚀 )",
+    "( 🍿 MAX ) ( ⚡ )",
+    "( 🏆 BEST ) ( ✨ )",
+    "( 🎯 DIRECT ) ( 🔥 )",
+    "( 🌀 PRO ) ( 💎 )",
+    "( 🛡️ SECURE ) ( ⚡ )",
+    "( 🤖 AUTO ) ( 🚀 )",
+    "( 💥 POWER ) ( 🔥 )",
+    "( ✨ SPECIAL ) ( 👑 )"
+]
 
 # In-memory cache of forward map: admin-side fwd_message_id -> original user_id
 _msg_map: dict[int, int] = {}
@@ -164,20 +184,21 @@ def format_bots_message(extra_top_msg: str = "", extra_bottom_msg: str = "") -> 
         lines.append(extra_top_msg.strip() + "\n")
 
     lines.append(header)
-    lines.append("")  # Empty line after header
+    lines.append("")  # 1 blank line after header
 
     if bots:
-        default_emojis = ["( 👨‍💻 )", "( ⚡ FASTEST )", "( 🔥 ACTIVE )", "( 🚀 SPEED )", "( 💎 VIP )", "( ✨ WORKING )"]
         for idx, b in enumerate(bots, start=1):
             uname = b.get("username", "").strip()
             tag = b.get("tag", "").strip()
             if not uname.startswith("@"):
                 uname = f"@{uname}"
-            if not tag:
-                tag = default_emojis[(idx - 1) % len(default_emojis)]
+
+            # Assign unique attractive emoji if empty or generic default tag
+            if not tag or tag in ["( 👨‍💻 )", "( 👨💻 )"]:
+                tag = UNIQUE_BOT_EMOJIS[(idx - 1) % len(UNIQUE_BOT_EMOJIS)]
 
             lines.append(f"{idx}. {uname} {tag}")
-            lines.append("")  # 1 space/blank line between bots
+            lines.append("")  # 1 space between each bot
     else:
         lines.append("<i>(Bots will be listed here. Use the button below to join our official channel!)</i>")
         lines.append("")
@@ -199,17 +220,17 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id == ADMIN_USER_ID:
         await update.message.reply_text(
             f"👨‍💼 <b>Welcome Admin!</b>\n\n"
-            f"Hello {first_name}! 👋\n\n"
-            f"📨 <b>How user messages work:</b>\n"
-            f"1. Users send messages/photos here\n"
+            f"Hello {first_name}! 🙏\n\n"
+            f"📨 <b>How user support works:</b>\n"
+            f"1. Users send questions or error screenshots here\n"
             f"2. They are forwarded directly to you\n"
-            f"3. <b>Reply</b> to any forwarded message (text or photo) to respond\n\n"
+            f"3. <b>Reply</b> to any forwarded message to respond\n\n"
             f"🤖 <b>Bot Management Commands:</b>\n"
             f"➕ <code>/addbot @bot [tag]</code> — Add/update bot\n"
             f"🔄 <code>/replacebot @old @new [tag]</code> — Replace banned bot\n"
             f"➖ <code>/delbot @bot</code> — Remove a bot\n"
             f"📋 <code>/bots</code> — View working bots list\n"
-            f"🔗 <code>/setlink [url]</code> — Change 'More bots' link\n"
+            f"🔗 <code>/setlink [url]</code> — Change button channel link\n"
             f"🏷️ <code>/setheader [text]</code> — Change list header\n"
             f"📝 <code>/setfooter [text]</code> — Change list footer\n"
             f"🔄 <code>/resetbots</code> — Reset to default list\n\n"
@@ -218,14 +239,18 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         mark_user_seen(user_id)
+        support_help_text = (
+            "💬 <b>Need Admin Support?</b>\n"
+            "📩 Send your message or 📸 <b>error screenshot of facing issue</b> below, and our admin will reply shortly! 👇"
+        )
         msg_text = format_bots_message(
-            extra_top_msg=f"👋 <b>Welcome {first_name}!</b> ✨\n",
-            extra_bottom_msg="📝 <b>Need Admin Support?</b>\nSend your message or 📷 photo below and our admin will reply shortly! 👇"
+            extra_top_msg=f"🙏 <b>Welcome {first_name}!</b> ✨\n",
+            extra_bottom_msg=support_help_text
         )
         data = load_bots_data()
         channel_link = data.get("channel_link", "https://t.me/+4vOykznly3A3ZDQ0")
         reply_markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📢 Join Channel / More Bots 🚀", url=channel_link)]
+            [InlineKeyboardButton("📢 Join Official Channel 🚀", url=channel_link)]
         ])
 
         await update.message.reply_text(
@@ -275,7 +300,7 @@ async def addbot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⚠️ <b>Usage:</b>\n"
             "<code>/addbot @bot_username [tag]</code>\n\n"
             "<b>Examples:</b>\n"
-            "<code>/addbot @Videos1_69_bot ( 🆕 ) ( 👨‍💻 )</code>\n"
+            "<code>/addbot @Videos1_69_bot ( 🆕 ) ( ⚡ )</code>\n"
             "<code>/addbot @Videos2_69_bot</code>",
             parse_mode='HTML'
         )
@@ -285,10 +310,10 @@ async def addbot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not bot_username.startswith("@"):
         bot_username = f"@{bot_username}"
 
-    tag = " ".join(context.args[1:]).strip() if len(context.args) > 1 else "( 👨‍💻 )"
-
     data = load_bots_data()
     bots = data.get("bots", [])
+
+    tag = " ".join(context.args[1:]).strip() if len(context.args) > 1 else UNIQUE_BOT_EMOJIS[len(bots) % len(UNIQUE_BOT_EMOJIS)]
 
     updated = False
     for b in bots:
@@ -324,7 +349,7 @@ async def replacebot_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "⚠️ <b>Usage:</b>\n"
             "<code>/replacebot @old_bot @new_bot [tag]</code>\n\n"
             "<b>Example:</b>\n"
-            "<code>/replacebot @old_bot @new_bot ( 🆕 ) ( 👨‍💻 )</code>",
+            "<code>/replacebot @old_bot @new_bot ( 🆕 ) ( ⚡ )</code>",
             parse_mode='HTML'
         )
         return
@@ -337,10 +362,10 @@ async def replacebot_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not new_bot.startswith("@"):
         new_bot = f"@{new_bot}"
 
-    custom_tag = " ".join(context.args[2:]).strip() if len(context.args) > 2 else None
-
     data = load_bots_data()
     bots = data.get("bots", [])
+
+    custom_tag = " ".join(context.args[2:]).strip() if len(context.args) > 2 else None
 
     found = False
     for b in bots:
@@ -352,7 +377,7 @@ async def replacebot_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             break
 
     if not found:
-        tag = custom_tag if custom_tag is not None else "( 👨‍💻 )"
+        tag = custom_tag if custom_tag is not None else UNIQUE_BOT_EMOJIS[len(bots) % len(UNIQUE_BOT_EMOJIS)]
         bots.append({"username": new_bot, "tag": tag})
 
     data["bots"] = bots
@@ -414,7 +439,7 @@ async def delbot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def setlink_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin command: Set channel link."""
+    """Admin command: Set channel link for the button."""
     if update.effective_user.id != ADMIN_USER_ID:
         return
 
@@ -429,7 +454,7 @@ async def setlink_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = load_bots_data()
     data["channel_link"] = link
     save_bots_data(data)
-    await update.message.reply_text(f"✅ Channel link updated to:\n{link}")
+    await update.message.reply_text(f"✅ Channel button link updated to:\n{link}")
 
 
 async def setheader_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -588,7 +613,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = load_bots_data()
         channel_link = data.get("channel_link", "https://t.me/+4vOykznly3A3ZDQ0")
         reply_markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📢 Join Channel / More Bots 🚀", url=channel_link)]
+            [InlineKeyboardButton("📢 Join Official Channel 🚀", url=channel_link)]
         ])
 
         # Users with hidden username can't be replied to — skip
@@ -597,8 +622,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 msg_text = format_bots_message(
                     extra_top_msg="⚠️ <b>Unable to forward your message to Admin.</b>\n"
-                                  "Your Telegram username is hidden, so the admin cannot reply to you.\n"
-                                  "👉 Please set a public username in <b>Telegram Settings → Username</b> and try again.\n"
+                                  "Your Telegram username is hidden, so the admin cannot reply back to you.\n\n"
+                                  "👉 Please set a public username in <b>Telegram Settings → Username</b> and send your message or 📸 <b>error screenshot of facing issue</b> again!\n"
                 )
                 await message.reply_text(
                     msg_text,
@@ -642,8 +667,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if first_time:
                 # 1st time user: send full working bots list + confirmation
                 full_promo_msg = format_bots_message(
-                    extra_bottom_msg="✅ <b>Your message has been sent to the Admin!</b> 📩\n"
-                                     "⏳ <i>Our team will reply to you shortly.</i> 👨‍💼🙏"
+                    extra_bottom_msg="✅ <b>Your message & screenshot have been sent to Admin!</b> 📩\n"
+                                     "⏳ <i>Our support team will review and reply to you shortly.</i> 👨‍💼🙏"
                 )
                 await message.reply_text(
                     full_promo_msg,
@@ -654,8 +679,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 # Returning user: concise confirmation with /bots tip
                 await message.reply_text(
-                    "✅ <b>Your message has been sent to the Admin!</b> 📩\n"
-                    "⏳ <i>Please wait patiently, our team will reply shortly.</i> 👨‍💼🙏\n\n"
+                    "✅ <b>Your message & screenshot have been sent to Admin!</b> 📩\n"
+                    "⏳ <i>Please wait patiently, our support team will reply shortly.</i> 👨‍💼🙏\n\n"
                     "💡 <i>Tip: Type /bots anytime to view all working bots!</i>",
                     parse_mode='HTML',
                     reply_markup=reply_markup,
