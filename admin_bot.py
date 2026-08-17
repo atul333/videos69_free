@@ -12,7 +12,7 @@ from telegram.request import HTTPXRequest
 
 load_dotenv()
 
-ADMIN_BOT_TOKEN = "8599538827:AAEByXuZDRmLP-8vP3TBaSajr7OGGV06bYI"
+ADMIN_BOT_TOKEN = "8655582748:AAEyQ7ircQeVJGOmBxiWKDkwZDfqNAUA25g"
 ADMIN_USER_ID   = 7708376300  # @Deep12048
 
 WORKING_BOTS_FILE = os.path.join(os.path.dirname(__file__), "working_bots.json")
@@ -156,7 +156,6 @@ def mark_user_seen(user_id: int):
 def format_bots_message(extra_top_msg: str = "", extra_bottom_msg: str = "") -> str:
     data = load_bots_data()
     header = data.get("header", "♨️ <b>Videos69 Working Bots List</b> 🤖")
-    channel_link = data.get("channel_link", "https://t.me/+4vOykznly3A3ZDQ0")
     bots = data.get("bots", [])
     footer = data.get("footer", "")
 
@@ -165,30 +164,31 @@ def format_bots_message(extra_top_msg: str = "", extra_bottom_msg: str = "") -> 
         lines.append(extra_top_msg.strip() + "\n")
 
     lines.append(header)
-
-    if channel_link:
-        lines.append(f'<a href="{channel_link}">[MORE BOTS CLICK HERE]</a>')
+    lines.append("")  # Empty line after header
 
     if bots:
-        for b in bots:
+        default_emojis = ["( 👨‍💻 )", "( ⚡ FASTEST )", "( 🔥 ACTIVE )", "( 🚀 SPEED )", "( 💎 VIP )", "( ✨ WORKING )"]
+        for idx, b in enumerate(bots, start=1):
             uname = b.get("username", "").strip()
             tag = b.get("tag", "").strip()
             if not uname.startswith("@"):
                 uname = f"@{uname}"
-            if tag:
-                lines.append(f"{uname} {tag}")
-            else:
-                lines.append(f"{uname}")
+            if not tag:
+                tag = default_emojis[(idx - 1) % len(default_emojis)]
+
+            lines.append(f"{idx}. {uname} {tag}")
+            lines.append("")  # 1 space/blank line between bots
     else:
-        lines.append("<i>(Bots will be listed here. Use the channel link above to access our bots!)</i>")
+        lines.append("<i>(Bots will be listed here. Use the button below to join our official channel!)</i>")
+        lines.append("")
 
     if footer:
-        lines.append(f"\n{footer}")
+        lines.append(footer)
 
     if extra_bottom_msg:
         lines.append("\n━━━━━━━━━━━━━━━━━━━━\n" + extra_bottom_msg.strip())
 
-    return "\n".join(lines)
+    return "\n".join(lines).strip()
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
