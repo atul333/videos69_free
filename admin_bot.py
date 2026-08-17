@@ -16,6 +16,7 @@ ADMIN_BOT_TOKEN = "8599538827:AAEByXuZDRmLP-8vP3TBaSajr7OGGV06bYI"
 ADMIN_USER_ID   = 7708376300  # @Deep12048
 
 WORKING_BOTS_FILE = os.path.join(os.path.dirname(__file__), "working_bots.json")
+MSG_MAP_FILE      = os.path.join(os.path.dirname(__file__), "msg_map.json")
 
 # Default template data if working_bots.json is missing
 DEFAULT_BOTS_DATA = {
@@ -26,7 +27,7 @@ DEFAULT_BOTS_DATA = {
     "seen_users": []
 }
 
-# Map: admin-side forwarded message_id → original user_id
+# In-memory cache of forward map: admin-side fwd_message_id -> original user_id
 _msg_map: dict[int, int] = {}
 
 # Robust timeouts — prevents false "Timed out" on slow connections
@@ -37,6 +38,83 @@ request = HTTPXRequest(
     write_timeout=20.0,
     pool_timeout=10.0,
 )
+
+
+def load_msg_map() -> dict[str, int]:
+    if os.path.exists(MSG_MAP_FILE):
+        try:
+            with open(MSG_MAP_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def save_msg_map(m_map: dict[str, int]):
+    try:
+        with open(MSG_MAP_FILE, "w", encoding="utf-8") as f:
+            json.dump(m_map, f, indent=2)
+    except Exception as e:
+        print(f"⚠️ Error saving {MSG_MAP_FILE}: {e}")
+
+
+def record_forward_map(fwd_msg_id: int, user_id: int):
+    """Store forwarded message ID to user ID mapping in memory and disk."""
+    _msg_map[fwd_msg_id] = user_id
+    try:
+        m_map = load_msg_map()
+        m_map[str(fwd_msg_id)] = user_id
+        if len(m_map) > 2000:
+            keys = list(m_map.keys())
+            for k in keys[:-2000]:
+                del m_map[k]
+        save_msg_map(m_map)
+    except Exception as e:
+        print(f"⚠️ Failed to save forward map: {e}")
+
+
+def get_user_from_map(fwd_msg_id: int) -> int | None:
+    """Retrieve original user ID from in-memory cache or persistent disk map."""
+    if fwd_msg_id in _msg_map:
+        return _msg_map[fwd_msg_id]
+    m_map = load_msg_map()
+    uid = m_map.get(str(fwd_msg_id))
+    if uid:
+        _msg_map[fwd_msg_id] = uid
+        return uid
+    return None
+
+
+def extract_forward_sender_id(msg) -> int | None:
+    """Safely extract user ID from forwarded message across all PTB versions."""
+    if not msg:
+        return None
+
+    # Check forward_from (PTB < 21.0)
+    try:
+        forward_from = getattr(msg, 'forward_from', None)
+        if forward_from and getattr(forward_from, 'id', None):
+            return forward_from.id
+    except Exception:
+        pass
+
+    # Check forward_origin (PTB >= 21.0)
+    try:
+        origin = getattr(msg, 'forward_origin', None)
+        if origin:
+            sender_user = getattr(origin, 'sender_user', None)
+            if sender_user and getattr(sender_user, 'id', None):
+                return sender_user.id
+            user = getattr(origin, 'user', None)
+            if user and getattr(user, 'id', None):
+                return user.id
+            chat = getattr(origin, 'chat', None) or getattr(origin, 'sender_chat', None)
+            if chat and getattr(chat, 'id', None):
+                return chat.id
+    except Exception:
+        pass
+
+    return None
 
 
 def load_bots_data() -> dict:
@@ -197,7 +275,7 @@ async def addbot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⚠️ <b>Usage:</b>\n"
             "<code>/addbot @bot_username [tag]</code>\n\n"
             "<b>Examples:</b>\n"
-            "<code>/addbot @terabof1bot ( 🆕 ) ( 👨‍💻 )</code>\n"
+            "<code>/addbot @Videos1_69_bot ( 🆕 ) ( 👨‍💻 )</code>\n"
             "<code>/addbot @Videos2_69_bot</code>",
             parse_mode='HTML'
         )
@@ -246,7 +324,7 @@ async def replacebot_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "⚠️ <b>Usage:</b>\n"
             "<code>/replacebot @old_bot @new_bot [tag]</code>\n\n"
             "<b>Example:</b>\n"
-            "<code>/replacebot @terabof1bot @terabof2bot ( 🆕 ) ( 👨‍💻 )</code>",
+            "<code>/replacebot @old_bot @new_bot ( 🆕 ) ( 👨‍💻 )</code>",
             parse_mode='HTML'
         )
         return
@@ -303,7 +381,7 @@ async def delbot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⚠️ <b>Usage:</b>\n"
             "<code>/delbot @bot_username</code>\n\n"
             "<b>Example:</b>\n"
-            "<code>/delbot @terabof1bot</code>",
+            "<code>/delbot @old_bot</code>",
             parse_mode='HTML'
         )
         return
@@ -423,7 +501,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not message.reply_to_message:
             await message.reply_text(
                 "ℹ️ <b>How to reply to a user:</b>\n\n"
-                "Simply <b>Reply</b> to their forwarded message (text or photo).\n"
+                "Simply <b>Reply</b> to their forwarded message (text, photo, or media).\n"
                 "Your reply will be sent directly to them.",
                 parse_mode='HTML'
             )
@@ -431,12 +509,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         replied_msg_id = message.reply_to_message.message_id
 
-        # Look up user from forward map
-        target_user_id = _msg_map.get(replied_msg_id)
+        # 1. Look up user from persistent forward map
+        target_user_id = get_user_from_map(replied_msg_id)
 
-        # Fallback: forward_from (only if user has no privacy shield)
-        if not target_user_id and message.reply_to_message.forward_from:
-            target_user_id = message.reply_to_message.forward_from.id
+        # 2. Safe Fallback: extract from forward_from / forward_origin
+        if not target_user_id:
+            target_user_id = extract_forward_sender_id(message.reply_to_message)
 
         if not target_user_id:
             print(f"⚠️ [admin_bot] Reply to msg {replied_msg_id} — not in map")
@@ -539,12 +617,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 from_chat_id=message.chat_id,
                 message_id=message.message_id
             )
-            # Store map so admin reply can be routed back
-            _msg_map[fwd.message_id] = user_id
-            # Keep map bounded — evict oldest entry beyond 500
-            if len(_msg_map) > 500:
-                oldest = next(iter(_msg_map))
-                del _msg_map[oldest]
+            # Store map persistently so admin reply can ALWAYS be routed back
+            record_forward_map(fwd.message_id, user_id)
 
             kind = "photo" if is_photo else ("text" if is_text else "media")
             print(f"📨 Forwarded {kind} from {first_name} ({user_id}) → admin msg {fwd.message_id}")
@@ -649,4 +723,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
