@@ -1,7 +1,9 @@
 import os
+import json
+import copy
 import asyncio
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     filters, ContextTypes
@@ -12,6 +14,17 @@ load_dotenv()
 
 ADMIN_BOT_TOKEN = "8599538827:AAEByXuZDRmLP-8vP3TBaSajr7OGGV06bYI"
 ADMIN_USER_ID   = 7708376300  # @Deep12048
+
+WORKING_BOTS_FILE = os.path.join(os.path.dirname(__file__), "working_bots.json")
+
+# Default template data if working_bots.json is missing
+DEFAULT_BOTS_DATA = {
+    "header": "♨️ <b>Videos69 Working Bots List</b> 🤖",
+    "channel_link": "https://t.me/+4vOykznly3A3ZDQ0",
+    "bots": [],
+    "footer": "Dear users aap inme se kisi bhi bot se unlimited videos access kr sakte hai. Jo bot band ho uska report hame yahan message kr dia kijie 👍",
+    "seen_users": []
+}
 
 # Map: admin-side forwarded message_id → original user_id
 _msg_map: dict[int, int] = {}
@@ -26,6 +39,80 @@ request = HTTPXRequest(
 )
 
 
+def load_bots_data() -> dict:
+    if os.path.exists(WORKING_BOTS_FILE):
+        try:
+            with open(WORKING_BOTS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"⚠️ Error loading {WORKING_BOTS_FILE}: {e}")
+    # Initialize default
+    data = copy.deepcopy(DEFAULT_BOTS_DATA)
+    save_bots_data(data)
+    return data
+
+
+def save_bots_data(data: dict):
+    try:
+        with open(WORKING_BOTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"❌ Error saving {WORKING_BOTS_FILE}: {e}")
+
+
+def is_first_time_user(user_id: int) -> bool:
+    data = load_bots_data()
+    seen = set(data.get("seen_users", []))
+    return user_id not in seen
+
+
+def mark_user_seen(user_id: int):
+    data = load_bots_data()
+    seen = set(data.get("seen_users", []))
+    if user_id not in seen:
+        seen.add(user_id)
+        data["seen_users"] = list(seen)
+        save_bots_data(data)
+
+
+def format_bots_message(extra_top_msg: str = "", extra_bottom_msg: str = "") -> str:
+    data = load_bots_data()
+    header = data.get("header", "♨️ <b>Videos69 Working Bots List</b> 🤖")
+    channel_link = data.get("channel_link", "https://t.me/+4vOykznly3A3ZDQ0")
+    bots = data.get("bots", [])
+    footer = data.get("footer", "")
+
+    lines = []
+    if extra_top_msg:
+        lines.append(extra_top_msg.strip() + "\n")
+
+    lines.append(header)
+
+    if channel_link:
+        lines.append(f'<a href="{channel_link}">[MORE BOTS CLICK HERE]</a>')
+
+    if bots:
+        for b in bots:
+            uname = b.get("username", "").strip()
+            tag = b.get("tag", "").strip()
+            if not uname.startswith("@"):
+                uname = f"@{uname}"
+            if tag:
+                lines.append(f"{uname} {tag}")
+            else:
+                lines.append(f"{uname}")
+    else:
+        lines.append("<i>(Bots will be listed here. Use the channel link above to access our bots!)</i>")
+
+    if footer:
+        lines.append(f"\n{footer}")
+
+    if extra_bottom_msg:
+        lines.append("\n━━━━━━━━━━━━━━━━━━━━\n" + extra_bottom_msg.strip())
+
+    return "\n".join(lines)
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user       = update.effective_user
     user_id    = user.id
@@ -33,30 +120,299 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user_id == ADMIN_USER_ID:
         await update.message.reply_text(
-            f"👨‍💼 *Welcome Admin!*\n\n"
+            f"👨‍💼 <b>Welcome Admin!</b>\n\n"
             f"Hello {first_name}! 👋\n\n"
-            f"📨 *How it works:*\n"
+            f"📨 <b>How user messages work:</b>\n"
             f"1. Users send messages/photos here\n"
             f"2. They are forwarded directly to you\n"
-            f"3. *Reply* to any forwarded message (text or photo) to respond\n\n"
+            f"3. <b>Reply</b> to any forwarded message (text or photo) to respond\n\n"
+            f"🤖 <b>Bot Management Commands:</b>\n"
+            f"➕ <code>/addbot @bot [tag]</code> — Add/update bot\n"
+            f"🔄 <code>/replacebot @old @new [tag]</code> — Replace banned bot\n"
+            f"➖ <code>/delbot @bot</code> — Remove a bot\n"
+            f"📋 <code>/bots</code> — View working bots list\n"
+            f"🔗 <code>/setlink [url]</code> — Change 'More bots' link\n"
+            f"🏷️ <code>/setheader [text]</code> — Change list header\n"
+            f"📝 <code>/setfooter [text]</code> — Change list footer\n"
+            f"🔄 <code>/resetbots</code> — Reset to default list\n\n"
             f"✅ Waiting for user messages…",
-            parse_mode='Markdown'
+            parse_mode='HTML'
         )
     else:
-        await update.message.reply_text(
-            f"👋 *Welcome to Admin Support Bot!*\n\n"
-            f"Hello {first_name}!\n\n"
-            f"📝 Send your message or 📷 photo and our admin will reply shortly.\n\n"
-            f"👨‍💼 *Admin Support Available* 👇",
-            parse_mode='Markdown'
+        mark_user_seen(user_id)
+        msg_text = format_bots_message(
+            extra_top_msg=f"👋 <b>Welcome {first_name}!</b> ✨\n",
+            extra_bottom_msg="📝 <b>Need Admin Support?</b>\nSend your message or 📷 photo below and our admin will reply shortly! 👇"
         )
+        data = load_bots_data()
+        channel_link = data.get("channel_link", "https://t.me/+4vOykznly3A3ZDQ0")
+        reply_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📢 Join Channel / More Bots 🚀", url=channel_link)]
+        ])
+
+        await update.message.reply_text(
+            msg_text,
+            parse_mode='HTML',
+            reply_markup=reply_markup,
+            disable_web_page_preview=True
+        )
+
+
+async def bots_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """View working bots list."""
+    user = update.effective_user
+    user_id = user.id
+    msg_text = format_bots_message()
+
+    data = load_bots_data()
+    channel_link = data.get("channel_link", "https://t.me/+4vOykznly3A3ZDQ0")
+    reply_markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📢 Join Official Channel 🚀", url=channel_link)]
+    ])
+
+    await update.message.reply_text(
+        msg_text,
+        parse_mode='HTML',
+        reply_markup=reply_markup,
+        disable_web_page_preview=True
+    )
+
+    if user_id == ADMIN_USER_ID:
+        await update.message.reply_text(
+            "👨‍💼 <b>Admin Quick Actions:</b>\n"
+            "➕ <code>/addbot @bot [tag]</code>\n"
+            "🔄 <code>/replacebot @old @new [tag]</code>\n"
+            "➖ <code>/delbot @bot</code>",
+            parse_mode='HTML'
+        )
+
+
+async def addbot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command: Add a new bot or update existing bot."""
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "⚠️ <b>Usage:</b>\n"
+            "<code>/addbot @bot_username [tag]</code>\n\n"
+            "<b>Examples:</b>\n"
+            "<code>/addbot @terabof1bot ( 🆕 ) ( 👨‍💻 )</code>\n"
+            "<code>/addbot @Videos2_69_bot</code>",
+            parse_mode='HTML'
+        )
+        return
+
+    bot_username = context.args[0].strip()
+    if not bot_username.startswith("@"):
+        bot_username = f"@{bot_username}"
+
+    tag = " ".join(context.args[1:]).strip() if len(context.args) > 1 else "( 👨‍💻 )"
+
+    data = load_bots_data()
+    bots = data.get("bots", [])
+
+    updated = False
+    for b in bots:
+        if b.get("username", "").lower() == bot_username.lower():
+            b["username"] = bot_username
+            b["tag"] = tag
+            updated = True
+            break
+
+    if not updated:
+        bots.append({"username": bot_username, "tag": tag})
+
+    data["bots"] = bots
+    save_bots_data(data)
+
+    action = "Updated" if updated else "Added"
+    await update.message.reply_text(
+        f"✅ <b>{action} working bot:</b>\n"
+        f"<code>{bot_username} {tag}</code>\n\n"
+        f"📊 Total working bots: <b>{len(bots)}</b>\n"
+        f"Type /bots to preview the updated list.",
+        parse_mode='HTML'
+    )
+
+
+async def replacebot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command: Replace a banned bot with a new bot."""
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "⚠️ <b>Usage:</b>\n"
+            "<code>/replacebot @old_bot @new_bot [tag]</code>\n\n"
+            "<b>Example:</b>\n"
+            "<code>/replacebot @terabof1bot @terabof2bot ( 🆕 ) ( 👨‍💻 )</code>",
+            parse_mode='HTML'
+        )
+        return
+
+    old_bot = context.args[0].strip()
+    if not old_bot.startswith("@"):
+        old_bot = f"@{old_bot}"
+
+    new_bot = context.args[1].strip()
+    if not new_bot.startswith("@"):
+        new_bot = f"@{new_bot}"
+
+    custom_tag = " ".join(context.args[2:]).strip() if len(context.args) > 2 else None
+
+    data = load_bots_data()
+    bots = data.get("bots", [])
+
+    found = False
+    for b in bots:
+        if b.get("username", "").lower() == old_bot.lower():
+            b["username"] = new_bot
+            if custom_tag is not None:
+                b["tag"] = custom_tag
+            found = True
+            break
+
+    if not found:
+        tag = custom_tag if custom_tag is not None else "( 👨‍💻 )"
+        bots.append({"username": new_bot, "tag": tag})
+
+    data["bots"] = bots
+    save_bots_data(data)
+
+    if found:
+        status_txt = f"Replaced <code>{old_bot}</code> ➔ <code>{new_bot}</code>"
+    else:
+        status_txt = f"Added <code>{new_bot}</code> (old bot <code>{old_bot}</code> was not in list)"
+
+    await update.message.reply_text(
+        f"✅ <b>{status_txt}</b>\n\n"
+        f"📊 Total working bots: <b>{len(bots)}</b>\n"
+        f"Type /bots to preview the updated list.",
+        parse_mode='HTML'
+    )
+
+
+async def delbot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command: Remove a bot from the working list."""
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "⚠️ <b>Usage:</b>\n"
+            "<code>/delbot @bot_username</code>\n\n"
+            "<b>Example:</b>\n"
+            "<code>/delbot @terabof1bot</code>",
+            parse_mode='HTML'
+        )
+        return
+
+    bot_username = context.args[0].strip()
+    if not bot_username.startswith("@"):
+        bot_username = f"@{bot_username}"
+
+    data = load_bots_data()
+    bots = data.get("bots", [])
+
+    new_bots = [b for b in bots if b.get("username", "").lower() != bot_username.lower()]
+
+    if len(new_bots) == len(bots):
+        await update.message.reply_text(
+            f"⚠️ Bot <code>{bot_username}</code> was not found in the list.",
+            parse_mode='HTML'
+        )
+        return
+
+    data["bots"] = new_bots
+    save_bots_data(data)
+
+    await update.message.reply_text(
+        f"🗑️ <b>Removed bot:</b> <code>{bot_username}</code>\n\n"
+        f"📊 Total remaining working bots: <b>{len(new_bots)}</b>\n"
+        f"Type /bots to preview the updated list.",
+        parse_mode='HTML'
+    )
+
+
+async def setlink_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command: Set channel link."""
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "⚠️ <b>Usage:</b> <code>/setlink https://t.me/+...</code>",
+            parse_mode='HTML'
+        )
+        return
+
+    link = context.args[0].strip()
+    data = load_bots_data()
+    data["channel_link"] = link
+    save_bots_data(data)
+    await update.message.reply_text(f"✅ Channel link updated to:\n{link}")
+
+
+async def setheader_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command: Set list header."""
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
+
+    text = update.message.text.partition(" ")[2].strip()
+    if not text:
+        await update.message.reply_text(
+            "⚠️ <b>Usage:</b> <code>/setheader <header text></code>",
+            parse_mode='HTML'
+        )
+        return
+
+    data = load_bots_data()
+    data["header"] = text
+    save_bots_data(data)
+    await update.message.reply_text("✅ Header updated successfully!")
+
+
+async def setfooter_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command: Set list footer."""
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
+
+    text = update.message.text.partition(" ")[2].strip()
+    if not text:
+        await update.message.reply_text(
+            "⚠️ <b>Usage:</b> <code>/setfooter <footer text></code>",
+            parse_mode='HTML'
+        )
+        return
+
+    data = load_bots_data()
+    data["footer"] = text
+    save_bots_data(data)
+    await update.message.reply_text("✅ Footer updated successfully!")
+
+
+async def resetbots_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command: Reset bots list to default."""
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
+
+    data = copy.deepcopy(DEFAULT_BOTS_DATA)
+    save_bots_data(data)
+    await update.message.reply_text(
+        "✅ Reset working bots list to default!\nType /bots to view.",
+        parse_mode='HTML'
+    )
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle text and photo messages from both users and admin."""
+    """Handle text, photo, and media messages from both users and admin."""
     user    = update.effective_user
     user_id = user.id
     message = update.message
+
+    if not message:
+        return
 
     # Determine message type
     is_photo = bool(message.photo)
@@ -66,10 +422,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id == ADMIN_USER_ID:
         if not message.reply_to_message:
             await message.reply_text(
-                "ℹ️ *How to reply to a user:*\n\n"
-                "Simply *Reply* to their forwarded message (text or photo).\n"
+                "ℹ️ <b>How to reply to a user:</b>\n\n"
+                "Simply <b>Reply</b> to their forwarded message (text or photo).\n"
                 "Your reply will be sent directly to them.",
-                parse_mode='Markdown'
+                parse_mode='HTML'
             )
             return
 
@@ -86,16 +442,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             print(f"⚠️ [admin_bot] Reply to msg {replied_msg_id} — not in map")
             try:
                 await message.reply_text(
-                    "⚠️ *Cannot send reply.*\n\n"
+                    "⚠️ <b>Cannot send reply.</b>\n\n"
                     "Could not identify the user for this message.\n"
                     "Please reply directly to their forwarded message.",
-                    parse_mode='Markdown'
+                    parse_mode='HTML'
                 )
             except Exception:
                 pass
             return
 
-        # Deliver admin reply (photo or text)
+        # Deliver admin reply (photo, text, or any other media)
         sent_ok = False
         try:
             if is_photo:
@@ -103,19 +459,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     chat_id=target_user_id,
                     photo=message.photo[-1].file_id,
                     caption=(
-                        f"👨‍💼 *Reply from Admin:*\n\n{message.caption}"
-                        if message.caption else "👨‍💼 *Reply from Admin:*"
+                        f"👨‍💼 <b>Reply from Admin:</b>\n\n{message.caption}"
+                        if message.caption else "👨‍💼 <b>Reply from Admin:</b>"
                     ),
-                    parse_mode='Markdown'
+                    parse_mode='HTML'
                 )
-            else:
+            elif is_text:
                 await context.bot.send_message(
                     chat_id=target_user_id,
-                    text=f"👨‍💼 *Reply from Admin:*\n\n{message.text}",
-                    parse_mode='Markdown'
+                    text=f"👨‍💼 <b>Reply from Admin:</b>\n\n{message.text}",
+                    parse_mode='HTML'
+                )
+            else:
+                await context.bot.copy_message(
+                    chat_id=target_user_id,
+                    from_chat_id=message.chat_id,
+                    message_id=message.message_id
                 )
             sent_ok = True
-            print(f"✅ Admin {'photo' if is_photo else 'text'} reply → user {target_user_id}")
+            print(f"✅ Admin reply → user {target_user_id}")
 
         except Exception as e:
             err = str(e)
@@ -125,17 +487,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif "chat not found" in err.lower():
                 note = "This user has never started a conversation with this bot."
             else:
-                note = f"`{err}`"
+                note = f"<code>{err}</code>"
             try:
                 await message.reply_text(
-                    f"❌ *Failed to send reply.*\n\n{note}",
-                    parse_mode='Markdown'
+                    f"❌ <b>Failed to send reply.</b>\n\n{note}",
+                    parse_mode='HTML'
                 )
             except Exception:
                 pass
             return
 
-        # Confirm to admin (separate try — timeout here ≠ send failure)
+        # Confirm to admin
         if sent_ok:
             try:
                 await message.reply_text("✅ Reply sent!")
@@ -145,22 +507,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── USER PATH ─────────────────────────────────────────────────────────────
     else:
         first_name = user.first_name or "Unknown"
+        data = load_bots_data()
+        channel_link = data.get("channel_link", "https://t.me/+4vOykznly3A3ZDQ0")
+        reply_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📢 Join Channel / More Bots 🚀", url=channel_link)]
+        ])
 
         # Users with hidden username can't be replied to — skip
         if not user.username:
             print(f"⚠️ [admin_bot] Skipped {first_name} ({user_id}) — no username")
             try:
+                msg_text = format_bots_message(
+                    extra_top_msg="⚠️ <b>Unable to forward your message to Admin.</b>\n"
+                                  "Your Telegram username is hidden, so the admin cannot reply to you.\n"
+                                  "👉 Please set a public username in <b>Telegram Settings → Username</b> and try again.\n"
+                )
                 await message.reply_text(
-                    "⚠️ *Unable to forward your message.*\n\n"
-                    "Your Telegram username is hidden, so the admin cannot reply to you.\n\n"
-                    "Please set a public username in *Telegram Settings → Username* and try again.",
-                    parse_mode='Markdown'
+                    msg_text,
+                    parse_mode='HTML',
+                    reply_markup=reply_markup,
+                    disable_web_page_preview=True
                 )
             except Exception:
                 pass
             return
 
-        # Forward message to admin (works for both text and photos)
+        # Forward message to admin (works for text, photos, documents, etc.)
         try:
             fwd = await context.bot.forward_message(
                 chat_id=ADMIN_USER_ID,
@@ -174,45 +546,57 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 oldest = next(iter(_msg_map))
                 del _msg_map[oldest]
 
-            kind = "photo" if is_photo else "message"
+            kind = "photo" if is_photo else ("text" if is_text else "media")
             print(f"📨 Forwarded {kind} from {first_name} ({user_id}) → admin msg {fwd.message_id}")
 
         except Exception as e:
             print(f"❌ [admin_bot] forward_message failed for {user_id}: {e}")
             try:
                 await message.reply_text(
-                    "❌ *Error sending message.*\n\nPlease try again later.",
-                    parse_mode='Markdown'
+                    "❌ <b>Error sending message.</b>\n\nPlease try again later.",
+                    parse_mode='HTML'
                 )
             except Exception:
                 pass
             return
 
-        # Confirm to user and auto-delete after 3 s
+        # Check if 1st time user or returning user
+        first_time = is_first_time_user(user_id)
+        mark_user_seen(user_id)
+
         try:
-            success_msg = await message.reply_text(
-                "✅ *Message sent!* The admin will reply shortly.",
-                parse_mode='Markdown'
-            )
-
-            async def _delete_later():
-                await asyncio.sleep(3)
-                try:
-                    await context.bot.delete_message(
-                        chat_id=message.chat_id,
-                        message_id=success_msg.message_id
-                    )
-                except Exception:
-                    pass
-
-            asyncio.create_task(_delete_later())
-        except Exception:
-            pass  # timeout on confirm is fine — forward already succeeded
+            if first_time:
+                # 1st time user: send full working bots list + confirmation
+                full_promo_msg = format_bots_message(
+                    extra_bottom_msg="✅ <b>Your message has been sent to the Admin!</b> 📩\n"
+                                     "⏳ <i>Our team will reply to you shortly.</i> 👨‍💼🙏"
+                )
+                await message.reply_text(
+                    full_promo_msg,
+                    parse_mode='HTML',
+                    reply_markup=reply_markup,
+                    disable_web_page_preview=True
+                )
+            else:
+                # Returning user: concise confirmation with /bots tip
+                await message.reply_text(
+                    "✅ <b>Your message has been sent to the Admin!</b> 📩\n"
+                    "⏳ <i>Please wait patiently, our team will reply shortly.</i> 👨‍💼🙏\n\n"
+                    "💡 <i>Tip: Type /bots anytime to view all working bots!</i>",
+                    parse_mode='HTML',
+                    reply_markup=reply_markup,
+                    disable_web_page_preview=True
+                )
+        except Exception as e:
+            print(f"⚠️ [admin_bot] Error sending confirmation to user {user_id}: {e}")
 
 
 def main():
     print("🤖 Starting Admin Support Bot…")
     print(f"👨‍💼 Admin ID: {ADMIN_USER_ID}")
+
+    # Ensure working_bots.json is initialized
+    load_bots_data()
 
     try:
         application = (
@@ -223,6 +607,16 @@ def main():
         )
 
         application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(CommandHandler("bots", bots_command))
+        application.add_handler(CommandHandler("botlist", bots_command))
+        application.add_handler(CommandHandler("addbot", addbot_command))
+        application.add_handler(CommandHandler("replacebot", replacebot_command))
+        application.add_handler(CommandHandler("delbot", delbot_command))
+        application.add_handler(CommandHandler("removebot", delbot_command))
+        application.add_handler(CommandHandler("setlink", setlink_command))
+        application.add_handler(CommandHandler("setheader", setheader_command))
+        application.add_handler(CommandHandler("setfooter", setfooter_command))
+        application.add_handler(CommandHandler("resetbots", resetbots_command))
 
         # Handle TEXT messages (excluding commands)
         application.add_handler(
@@ -231,6 +625,10 @@ def main():
         # Handle PHOTO messages
         application.add_handler(
             MessageHandler(filters.PHOTO, handle_message)
+        )
+        # Handle OTHER media messages (document, video, audio, sticker, voice)
+        application.add_handler(
+            MessageHandler(filters.ALL & ~filters.COMMAND & ~filters.TEXT & ~filters.PHOTO, handle_message)
         )
 
         print("✅ Admin Support Bot is running!")
@@ -251,3 +649,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

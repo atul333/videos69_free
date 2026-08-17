@@ -240,18 +240,41 @@ d:\Videos69 bot\
 - Check admin user ID is correct
 - Verify bot has permissions
 
-### Admin Can't Reply
-- Must reply to forwarded message
-- Can't send new message
-- Check user hasn't blocked bot
+## Working Bots Management (Admin Commands)
+
+Admin (@Deep12048) can manage the dynamic working bots list at any time directly in the Admin Bot chat:
+
+| Command | Description | Example |
+| :--- | :--- | :--- |
+| `/bots` or `/botlist` | View working bots list formatted for users | `/bots` |
+| `/addbot <@bot> [tag]` | Add or update a bot in the list | `/addbot @terabof1bot ( 🆕 ) ( 👨‍💻 )` |
+| `/replacebot <@old> <@new> [tag]` | Replace a banned bot with a new working bot | `/replacebot @terabof1bot @terabof2bot` |
+| `/delbot <@bot>` | Remove a banned/inactive bot from the list | `/delbot @terabof1bot` |
+| `/setlink <url>` | Update the `[MORE BOTS CLICK HERE]` link | `/setlink https://t.me/+4vOykznly3A3ZDQ0` |
+| `/setheader <text>` | Change the list title/header | `/setheader ♨️ NRBOTS Working Bots 🙊` |
+| `/setfooter <text>` | Change the footer note/instructions | `/setfooter Dear users aap inme se...` |
+| `/resetbots` | Reset working bots list to default template | `/resetbots` |
+
+All bot list changes persist automatically in `working_bots.json`.
+
+---
+
+## User Experience Flow
+
+1. **User opens bot / `/start`**: Receives full working bots list + channel button + support instructions.
+2. **User sends message for the 1st time**: Receives full working bots list + delivery confirmation to admin.
+3. **User sends subsequent messages**: Message is forwarded to admin, user receives concise confirmation with `/bots` tip.
+4. **User types `/bots`**: User can view the up-to-date working bots list anytime.
+
+---
 
 ## Summary
 
 **Two Bots System:**
 1. **Main Bot** - Videos, /help directs to admin bot
-2. **Admin Bot** - Support messages, forwards to admin
+2. **Admin Bot** - Support messages, forwards to admin, dynamic working bots list manager
 
-**Admin:**  (ID: 7708376300)
+**Admin:** @Deep12048 (ID: 7708376300)
 
 **To Start:**
 ```bash
@@ -260,3 +283,4 @@ python admin_bot.py  # Terminal 2
 ```
 
 Both bots must be running for full functionality!
+
