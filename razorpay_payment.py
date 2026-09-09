@@ -45,14 +45,14 @@ RZP_HOURS  = int(os.getenv("RZP_PREMIUM_HOURS",  "720"))
 # Unicode U+0336 = COMBINING LONG STROKE OVERLAY (strikethrough on prev char)
 # key → (button_label, hours, amount_paise, plan_name, rzp_description)
 PLANS: dict[str, tuple] = {
-    "lifetime":         ("\U0001f6a8\U0001f48e Lifetime \u2014 \u20b9\u03361\u03362\u03369\u0336 \u20b9129 \u2014 50% OFF \U0001f525", 87600, 12900, "Lifetime Premium", "Videos Bot \u2014 Lifetime Unlimited"),
-    "1d":               ("\u26a1\U0001f3ac 1 Day \u2014 \u20b95",  24,   500,  "1 Day Premium",    "Videos Bot \u2014 1 Day Unlimited"),
-    "5d":               ("\U0001f525\u2b50 5 Days \u2014 \u20b9\u03361\u03362\u0336 \u20b912 \u2014 47% OFF", 120,  1200,  "5 Day Premium",    "Videos Bot \u2014 5 Days Unlimited"),
-    "15d":              ("\U0001f4a5\U0001f4b0 15 Days \u2014 \u20b9\u03365\u03360\u0336 \u20b925 \u2014 50% OFF", 360, 2500, "15 Day Premium", "Videos Bot \u2014 15 Days Unlimited"),
-    "30d":              ("\U0001f3c6\U0001f451 30 Days \u2014 \u20b9\u03367\u03368\u0336 \u20b939 \u2014 50% OFF", 720, 3900, "30 Day Premium", "Videos Bot \u2014 30 Days Unlimited"),
+    "lifetime":         ("🚨💎 Lifetime — ₹6̶4̶5̶ ₹129 — 80% OFF 🔥", 87600, 12900, "Lifetime Premium", "Videos Bot — Lifetime Unlimited"),
+    "1d":               ("⚡🎬 1 Day — ₹5",  24,   500,  "1 Day Premium",    "Videos Bot — 1 Day Unlimited"),
+    "5d":               ("🔥⭐ 5 Days — ₹2̶5̶ ₹12 — 52% OFF", 120,  1200,  "5 Day Premium",    "Videos Bot — 5 Days Unlimited"),
+    "15d":              ("💥💰 15 Days — ₹7̶5̶ ₹25 — 67% OFF", 360, 2500, "15 Day Premium", "Videos Bot — 15 Days Unlimited"),
+    "30d":              ("🏆👑 30 Days — ₹1̶5̶0̶ ₹39 — 74% OFF", 720, 3900, "30 Day Premium", "Videos Bot — 30 Days Unlimited"),
     # ── Hidden loyalty plan — ₹49 for returning buyers via upsell button only ──
     # NOT shown in normal plan keyboards. Only reachable via the upsell button.
-    "lifetime_loyalty": ("\U0001f6a8\U0001f48e Lifetime \u2014 \u20b9\u03361\u03362\u03369\u0336 \u20b949 [62% OFF \u2014 Special Offer]", 87600, 4900, "Lifetime Premium", "Videos Bot \u2014 Lifetime Unlimited"),
+    "lifetime_loyalty": ("🚨💎 Lifetime — ₹6̶4̶5̶ ₹49 [92% OFF — Special Offer]", 87600, 4900, "Lifetime Premium", "Videos Bot — Lifetime Unlimited"),
 }
 
 
