@@ -45,14 +45,14 @@ RZP_HOURS  = int(os.getenv("RZP_PREMIUM_HOURS",  "720"))
 # Unicode U+0336 = COMBINING LONG STROKE OVERLAY (strikethrough on prev char)
 # key → (button_label, hours, amount_paise, plan_name, rzp_description)
 PLANS: dict[str, tuple] = {
-    "lifetime":         ("🚨💎 Lifetime — ₹6̶4̶5̶ ₹129 — 80% OFF 🔥", 87600, 12900, "Lifetime Premium", "Videos Bot — Lifetime Unlimited"),
+    "lifetime":         ("🚨💎 Lifetime — ₹4̶9̶5̶ ₹99 — 80% OFF 🔥", 87600, 9900, "Lifetime Premium", "Videos Bot — Lifetime Unlimited"),
     "1d":               ("⚡🎬 1 Day — ₹5",  24,   500,  "1 Day Premium",    "Videos Bot — 1 Day Unlimited"),
     "5d":               ("🔥⭐ 5 Days — ₹2̶5̶ ₹12 — 52% OFF", 120,  1200,  "5 Day Premium",    "Videos Bot — 5 Days Unlimited"),
     "15d":              ("💥💰 15 Days — ₹7̶5̶ ₹25 — 67% OFF", 360, 2500, "15 Day Premium", "Videos Bot — 15 Days Unlimited"),
     "30d":              ("🏆👑 30 Days — ₹1̶5̶0̶ ₹39 — 74% OFF", 720, 3900, "30 Day Premium", "Videos Bot — 30 Days Unlimited"),
     # ── Hidden loyalty plan — ₹49 for returning buyers via upsell button only ──
     # NOT shown in normal plan keyboards. Only reachable via the upsell button.
-    "lifetime_loyalty": ("🚨💎 Lifetime — ₹6̶4̶5̶ ₹49 [92% OFF — Special Offer]", 87600, 4900, "Lifetime Premium", "Videos Bot — Lifetime Unlimited"),
+    "lifetime_loyalty": ("🚨💎 Lifetime — ₹4̶9̶5̶ ₹49 [90% OFF — Special Offer]", 87600, 4900, "Lifetime Premium", "Videos Bot — Lifetime Unlimited"),
 }
 
 
