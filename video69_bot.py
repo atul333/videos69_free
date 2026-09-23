@@ -2503,43 +2503,69 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.answer_callback_query(callback_query_id=query.id, text="Error. Please try again.")
 
 async def _startup_pending_deletion_cleanup(application: Application):
-    """On restart: delete overdue messages immediately; reschedule still-pending ones.
-
-    This handles the case where the bot was stopped while 20-min timers were
-    still running.  Any message whose deadline has passed is deleted right away;
-    messages still within their window get a new job for their remaining time.
+    """On restart: delete overdue messages in background; reschedule still-pending ones.
+    Runs asynchronously in the background so it NEVER blocks bot startup or polling.
     """
-    rows = await _get_all_pending_deletions()
-    if not rows:
-        return
+    try:
+        now_ts = _now_utc().timestamp()
 
-    now_ts = _now_utc().timestamp()
-    rescheduled = 0
-    deleted_now = 0
-    errors = 0
+        # 1. Purge ancient records older than 48 hours directly in DB
+        # Telegram API fails with 'message can't be deleted' for messages > 48h anyway.
+        cutoff_48h = now_ts - (48 * 3600)
+        try:
+            async with aiosqlite.connect("user_states.db") as db:
+                await db.execute("PRAGMA journal_mode=WAL")
+                await db.execute("DELETE FROM pending_deletions WHERE delete_at < ?", (cutoff_48h,))
+                await db.commit()
+        except Exception as e:
+            logger.warning("[pending_deletions] Purge >48h error: %s", e)
 
-    for (row_id, chat_id, message_id, delete_at) in rows:
-        remaining = delete_at - now_ts
-        if remaining <= 0:
-            # Overdue — delete immediately
+        rows = await _get_all_pending_deletions()
+        if not rows:
+            return
+
+        rescheduled = 0
+        deleted_now = 0
+        errors = 0
+        deleted_ids = []
+
+        # Process at most 100 overdue messages to avoid Telegram rate limits
+        for (row_id, chat_id, message_id, delete_at) in rows:
+            remaining = delete_at - now_ts
+            if remaining <= 0:
+                if deleted_now < 100:
+                    try:
+                        await application.bot.delete_message(chat_id=chat_id, message_id=message_id)
+                        deleted_now += 1
+                        await asyncio.sleep(0.05)  # Telegram rate limit compliance
+                    except Exception:
+                        errors += 1
+                deleted_ids.append(row_id)
+            else:
+                # Still within window — reschedule
+                application.job_queue.run_once(
+                    delete_messages,
+                    when=remaining,
+                    data={'chat_id': chat_id, 'message_ids': [message_id]},
+                    name=f"delete_{chat_id}_{message_id}"
+                )
+                rescheduled += 1
+
+        # Batch delete processed records from DB
+        if deleted_ids:
             try:
-                await application.bot.delete_message(chat_id=chat_id, message_id=message_id)
-                deleted_now += 1
-            except Exception:
-                errors += 1  # already deleted or other error — ignore
-            await _remove_pending_deletion(chat_id, message_id)
-        else:
-            # Still within window — reschedule for remaining seconds
-            application.job_queue.run_once(
-                delete_messages,
-                when=remaining,
-                data={'chat_id': chat_id, 'message_ids': [message_id]},
-                name=f"delete_{chat_id}_{message_id}"
-            )
-            rescheduled += 1
+                async with aiosqlite.connect("user_states.db") as db:
+                    await db.execute("PRAGMA journal_mode=WAL")
+                    placeholders = ",".join("?" for _ in deleted_ids)
+                    await db.execute(f"DELETE FROM pending_deletions WHERE id IN ({placeholders})", deleted_ids)
+                    await db.commit()
+            except Exception as e:
+                logger.warning("[pending_deletions] Batch remove error: %s", e)
 
-    print(f"🧹 Startup cleanup: {deleted_now} overdue videos deleted, "
-          f"{rescheduled} rescheduled, {errors} already gone")
+        logger.info("🧹 Startup cleanup: %d deleted, %d rescheduled, %d purged",
+                    deleted_now, rescheduled, errors + (len(deleted_ids) - deleted_now))
+    except Exception as e:
+        logger.error("⚠️ Startup deletion cleanup error: %s", e)
 
 
 async def post_init(application: Application):
@@ -2575,11 +2601,27 @@ async def post_init(application: Application):
         _bot_users_flush_loop(), name="bot_users_flush"
     )
 
-    # 6. Handle orphaned pending-deletion jobs from previous run
-    await _startup_pending_deletion_cleanup(application)
+    # 6. Handle orphaned pending-deletion jobs in BACKGROUND (never block startup!)
+    asyncio.create_task(
+        _startup_pending_deletion_cleanup(application),
+        name="startup_pending_deletion_cleanup"
+    )
 
     # 7. Start Razorpay webhook server (background aiohttp server)
-    await start_webhook_server(application, ADMIN_USER_ID, BOT_USERNAME)
+    try:
+        await start_webhook_server(application, ADMIN_USER_ID, BOT_USERNAME)
+    except Exception as e:
+        logger.error("❌ Razorpay webhook server failed to start: %s", e)
+
+    # 8. Report actual connected bot info
+    try:
+        me = await application.bot.get_me()
+        logger.info("=" * 60)
+        logger.info("🚀 BOT ONLINE & POLLING: @%s (ID: %s, Name: %s)", me.username, me.id, me.first_name)
+        logger.info("=" * 60)
+        print(f"\n🚀 BOT IS ONLINE AND LISTENING! Connected as: @{me.username} (ID: {me.id})\n", flush=True)
+    except Exception as e:
+        logger.warning("Could not fetch bot details via get_me: %s", e)
 
 async def post_shutdown(application: Application):
     """Clean shutdown: flush all dirty writes and close all DB/HTTP connections."""
@@ -3598,14 +3640,13 @@ def main():
         print(f"   Then every 24 hours at midnight (12:00 AM)")
         print()
         
-        # Start the bot
+        # Start the bot polling
         print("=" * 50)
-        print("✅ BOTH BOTS ARE RUNNING!")
+        print("📡 STARTING TELEGRAM POLLING...")
         print("=" * 50)
         print()
-        print("📱 Main Bot: @Videos1_69_bot")
-        print("   Purpose: Video distribution")
-        print(f"   Channel ID: {CHANNEL_ID}")
+        print("📱 Starting Main Videos Bot...")
+        print(f"   Configured Channel ID: {CHANNEL_ID}")
         print("   Features: Videos, Premium, Daily Limits")
         print()
         print("💬 Admin Bot: @videos69Admin_Bot")
@@ -3616,12 +3657,12 @@ def main():
         print("🎲 Videos will be sent randomly from the channel!")
         print("📞 Users can contact admin via /help command")
         print()
-        
+
         application.run_polling(
             allowed_updates=Update.ALL_TYPES,
             poll_interval=1.0,    # Poll every 1s — still fast; 0.5 doubles API calls for no benefit
             timeout=30,           # Long-poll timeout (seconds)
-            drop_pending_updates=True,
+            drop_pending_updates=False,
         )
         
     except Exception as e:
