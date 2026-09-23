@@ -5,8 +5,13 @@ import subprocess
 import sys
 import logging
 import time as _time
+import traceback
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
+
+# ── Force unbuffered output (essential for nohup to capture print() in real-time)
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -71,21 +76,31 @@ from razorpay_payment import (
 load_dotenv()
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
+# Use absolute path so bot.log is ALWAYS next to the script, not the CWD.
+_BOT_DIR = os.path.dirname(os.path.abspath(__file__))
+_LOG_FILE = os.path.join(_BOT_DIR, "bot.log")
+
 logging.basicConfig(
-    level=logging.DEBUG,          # DEBUG captures INFO + WARNING + ERROR + CRITICAL
+    level=logging.INFO,           # INFO level — reduces noise in nohup/bot.log
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("bot.log", encoding="utf-8"),
+        logging.StreamHandler(sys.stdout),          # → nohup.out
+        logging.FileHandler(_LOG_FILE, encoding="utf-8"),  # → bot.log
     ]
 )
 logger = logging.getLogger("video69_bot")
+logger.info("=" * 60)
+logger.info("BOT STARTUP — logging initialized. Log file: %s", _LOG_FILE)
+logger.info("=" * 60)
+
+# Silence noisy third-party loggers
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("aiosqlite").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
+logging.getLogger("asyncio").setLevel(logging.WARNING)   # suppresses 'Using selector: EpollSelector'
 
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 CHANNEL_USERNAME = os.getenv('CHANNEL_USERNAME')
@@ -3419,50 +3434,44 @@ async def admin_delete_broadcast_command(update: Update, context: ContextTypes.D
 
 def main():
     """Start the bot"""
-    print("🤖 Starting Videos Bot System...")
-    print("=" * 50)
-    
+    logger.info("🤖 Starting Videos Bot System...")
+    logger.info("=" * 50)
+
     # Clean up expired data on startup
-    print("\n🧹 Cleaning up expired data...")
+    logger.info("🧹 Cleaning up expired data...")
     cleanup_expired_data(user_states)
-    
+
     # Display statistics
     stats = get_stats(user_states)
-    print(f"\n📊 User Statistics:")
-    print(f"   Total users: {stats['total_users']}")
-    print(f"   💎 Premium users: {stats['premium_users']}")
-    print(f"   🆓 Free users: {stats['free_users']}")
-    print(f"   🎬 Total videos watched: {stats['total_videos_watched']}")
-    print(f"   📈 Avg videos per user: {stats['avg_videos_per_user']:.1f}")
-    print()
-    
+    logger.info("📊 User Statistics:")
+    logger.info("   Total users: %s", stats['total_users'])
+    logger.info("   💎 Premium users: %s", stats['premium_users'])
+    logger.info("   🆓 Free users: %s", stats['free_users'])
+    logger.info("   🎬 Total videos watched: %s", stats['total_videos_watched'])
+    logger.info("   📈 Avg videos per user: %.1f", stats['avg_videos_per_user'])
+
     # Start the admin bot in a separate process (Windows only)
     # On Linux, use start_bots.sh script instead
     admin_bot_process = None
     if sys.platform == "win32":
         try:
-            print("📱 [1/2] Starting Admin Support Bot...")
+            logger.info("📱 [1/2] Starting Admin Support Bot...")
             admin_bot_path = os.path.join(os.path.dirname(__file__), "admin_bot.py")
-            
+
             admin_bot_process = subprocess.Popen(
                 [sys.executable, admin_bot_path],
                 creationflags=subprocess.CREATE_NEW_CONSOLE
             )
-            
-            print("✅ Admin Bot started successfully!")
-            print(f"   Bot: @videos69Admin_Bot")
-            print(f"   Admin: ")
-            print()
+
+            logger.info("✅ Admin Bot started successfully!")
         except Exception as e:
-            print(f"⚠️ Warning: Could not start admin bot: {e}")
-            print("   You can start it manually: python admin_bot.py")
-            print()
+            logger.warning("⚠️ Could not start admin bot: %s", e)
+            logger.warning("   You can start it manually: python admin_bot.py")
     else:
-        print("ℹ️ On Linux, use './start_bots.sh' to start both bots")
-        print()
-    
-    print("🎬 [2/2] Starting Main Videos Bot...")
-    print("🌐 Connecting to Telegram API...")
+        logger.info("ℹ️ On Linux, use './start_bots.sh' to start both bots")
+
+    logger.info("🎬 [2/2] Starting Main Videos Bot...")
+    logger.info("🌐 Connecting to Telegram API...")
     print()
     
     try:
@@ -3616,17 +3625,25 @@ def main():
         )
         
     except Exception as e:
-        print(f"\n❌ Error starting bot: {e}")
-        print("\n🔧 Troubleshooting tips:")
-        print("1. Check your internet connection")
-        print("2. If you're in a region where Telegram is blocked, try using a VPN")
-        print("3. Verify your BOT_TOKEN in the .env file is correct")
-        print("4. Make sure you have the latest version of python-telegram-bot installed")
-        print("5. Try running: pip install --upgrade python-telegram-bot")
-        print("\n💡 If the error is 'Timed out', it means the bot cannot reach Telegram servers.")
-        print("   This is usually a network/firewall/proxy issue, not a code issue.")
+        # Log the FULL traceback to both nohup.out AND bot.log
+        logger.error("=" * 60)
+        logger.error("BOT CRASHED with unhandled exception:")
+        logger.error("%s", traceback.format_exc())
+        logger.error("=" * 60)
+        print(f"\n❌ Error starting bot: {e}", flush=True)
+        print("\n🔧 Troubleshooting tips:", flush=True)
+        print("1. Check your internet connection", flush=True)
+        print("2. Verify your BOT_TOKEN in the .env file is correct", flush=True)
+        print("3. Make sure you have the latest version of python-telegram-bot installed", flush=True)
+        print("4. Try running: pip install --upgrade python-telegram-bot", flush=True)
+        print("\n💡 If the error is 'Timed out', it means the bot cannot reach Telegram servers.", flush=True)
+        print("   This is usually a network/firewall/proxy issue, not a code issue.", flush=True)
 
 
 if __name__ == '__main__':
-    main()
-
+    try:
+        main()
+    except Exception:
+        logger.error("FATAL: Bot crashed at top level:")
+        logger.error("%s", traceback.format_exc())
+        sys.exit(1)
