@@ -51,6 +51,11 @@ from premium_sync import (
     increment_synced_download,
     reset_synced_downloads,
     get_total_synced_downloads_today,
+    # Video watch sync (cross-bot shared daily limit)
+    get_synced_video_watch_count,
+    increment_synced_video_watch,
+    reset_synced_video_watches,
+    get_total_synced_video_watches_today,
     # Bot tokens sync
     register_bot_token,
     # Expiry notification dedup (ensures only 1 bot sends the message)
@@ -160,8 +165,8 @@ import time as _time
 _next_video_cooldown: dict[int, float] = {}
 _NEXT_VIDEO_COOLDOWN_SECONDS = 2
 
-# Video limit for free users (resets every 24 hours)
-DAILY_VIDEO_LIMIT = 1  # Free users can watch 1 video per day
+# Video limit for free users (resets every 24 hours at midnight IST across all instances)
+DAILY_VIDEO_LIMIT = 5  # Free users can watch 5 videos per day across all bot instances
 # Premium access duration after watching ad (12 hours)
 PREMIUM_DURATION_HOURS = 12
 # Number of videos that can be downloaded/saved by normal users (every 24 hours)
@@ -1046,7 +1051,7 @@ async def broadcast_daily_reset(context: ContextTypes.DEFAULT_TYPE):
             f"⏰ Time: **{time_str} IST**\n"
             f"📅 Date: **{date_str}**\n\n"
             f"✨ Your limits have been renewed!\n"
-            f"🎥 You can now watch **3 free videos**\n"
+            f"🎥 You can now watch **{DAILY_VIDEO_LIMIT} free videos**\n"
             f"📥 You can download **2 videos**\n"
             f"💎 Premium users get **100 downloads**!\n\n"
             f"⏱️ Limits reset every **24 hours at midnight**\n"
@@ -1134,8 +1139,11 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         # Compute is_premium ONCE — checks local state + shared cross-bot DB
         is_premium = await is_premium_user_async(user_id)
         if not is_premium:
-            check_and_reset_daily_limit(user_id)  # reset counter if new day
-        can_watch = is_premium or user_states[user_id]['hourly_count'] < DAILY_VIDEO_LIMIT
+            check_and_reset_daily_limit(user_id)  # reset local counter if new day
+
+        # Check shared video watch count across all bot instances (premium_shared.db)
+        watched_count = await get_synced_video_watch_count(user_id)
+        can_watch = is_premium or watched_count < DAILY_VIDEO_LIMIT
 
         if not can_watch:
             # Build the keyboard with all premium plans
@@ -1180,8 +1188,9 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=(
-                    "🚫 *Video Limit Reached!*\n\n"
-                    "You've used your free video for today.\n\n"
+                    f"🚫 *Daily Video Limit Reached!* ({DAILY_VIDEO_LIMIT}/{DAILY_VIDEO_LIMIT})\n\n"
+                    f"You've watched all *{DAILY_VIDEO_LIMIT} free videos* for today across our bots.\n"
+                    f"⏳ Next free videos reset in: *{time_msg}* (midnight IST)\n\n"
                     "━━━━━━━━━━━━━━━━━━━━\n"
                     "💎 *Upgrade to Premium & Get:*\n\n"
                     "🎬 Unlimited Video Watching\n"
@@ -1191,7 +1200,7 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                     "🌟 Ad-Free Experience\n"
                     "━━━━━━━━━━━━━━━━━━━━\n\n"
                     "🔥 Plans start at just *₹5!*\n"
-                    "👇 Buy a plan or watch an ad to continue"
+                    "👇 Buy a plan or watch an ad to continue watching:"
                 ),
                 parse_mode='Markdown',
                 reply_markup=reply_markup
@@ -1225,8 +1234,10 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                             f"⚠️ This video will be deleted after 20 minutes."
                         )
                     else:
+                        remaining_free = max(0, DAILY_VIDEO_LIMIT - (watched_count + 1))
                         caption_text = (
                             f"👆 Enjoy the video!\n\n"
+                            f"🎬 Free videos remaining today: {remaining_free}/{DAILY_VIDEO_LIMIT}\n"
                             f"💾 Click 'Download' button to get a downloadable copy\n"
                             f"📥 Downloads remaining: {remaining}\n\n"
                             f"⚠️ This video will be deleted after 20 minutes."
@@ -1277,13 +1288,12 @@ async def send_random_video(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                     protect_content=True,
                 )
 
+                # Increment shared watch count across ALL bot instances in premium_shared.db
+                new_watched_count = await increment_synced_video_watch(user_id)
+
                 # Batch both mutations into one save_user_states call (single SQLite flush).
                 user_states[user_id]['seen_videos'].add(message_id)
-                # Always increment hourly_count for ALL users (premium + free).
-                # The daily-limit check is: is_premium OR count < LIMIT
-                # Since is_premium short-circuits first, premium users are never blocked
-                # by this counter — but it lets /stats correctly count their videos.
-                user_states[user_id]['hourly_count'] += 1
+                user_states[user_id]['hourly_count'] = new_watched_count
                 save_user_states(user_states, _hint_uid=user_id)  # single flush
 
                 # Schedule deletion — only one message now (video+caption are the same msg)
@@ -1472,7 +1482,7 @@ Hello {first_name}! 👋
 
 I'm here to share amazing videos with you!
 
-🎥 You can watch **1 free video per day**!
+🎥 You can watch **{DAILY_VIDEO_LIMIT} free videos per day**!
 ⏰ Your limit resets every **24 hours at midnight IST**
 
 💾 You can **download 1 video per day**!
@@ -2028,7 +2038,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"✅ **Verified!**\n\n"
                     f"Welcome {first_name}! 👋\n\n"
                     f"You've successfully joined both channels!\n\n"
-                    f"🎥 You can watch **1 free video** per day!\n"
+                    f"🎥 You can watch **{DAILY_VIDEO_LIMIT} free videos** per day!\n"
                     f"📥 You can download **1 video** per day!\n"
                     f"⏰ Limits reset every **24 hours at midnight IST**!\n\n"
                     f"💎 Want unlimited access? Watch an ad for **12 hours of premium**!\n\n"

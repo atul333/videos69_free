@@ -82,6 +82,14 @@ CREATE TABLE IF NOT EXISTS shared_downloads (
     reset_date       TEXT    NOT NULL DEFAULT ''   -- IST date 'YYYY-MM-DD'
 );
 
+-- ── Shared video watch counter table ─────────────────────────────────────
+-- reset_date is stored as YYYY-MM-DD in IST so all bot instances reset at midnight IST
+CREATE TABLE IF NOT EXISTS shared_video_watches (
+    user_id          INTEGER PRIMARY KEY,
+    watched_count    INTEGER NOT NULL DEFAULT 0,
+    reset_date       TEXT    NOT NULL DEFAULT ''   -- IST date 'YYYY-MM-DD'
+);
+
 -- ── Bot Tokens table ───────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS bot_tokens (
     token TEXT PRIMARY KEY,
@@ -460,6 +468,125 @@ async def get_total_synced_downloads_today() -> int:
         return row[0] or 0 if row else 0
     except Exception as e:
         print(f"⚠️ [SharedSync] total downloads error: {e}")
+        return 0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  VIDEO WATCH SYNC
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def get_synced_video_watch_count(user_id: int) -> int:
+    """
+    Return how many videos this user has watched TODAY (IST) across ALL bots.
+    If the stored reset_date is older than today, returns 0 (treats as reset).
+    Returns 0 on DB error (fail-open — don't block watching on DB failure).
+    """
+    if not _db_ready:
+        return 0
+    today = _today_ist()
+    try:
+        db = await _open_db()
+        async with db.execute(
+            "SELECT watched_count, reset_date FROM shared_video_watches WHERE user_id=?",
+            (user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        await db.close()
+
+        if row is None:
+            return 0
+        count, reset_date = row[0], row[1]
+        return count if reset_date == today else 0
+    except Exception as e:
+        print(f"⚠️ [SharedSync] video watch read error uid={user_id}: {e}")
+        return 0
+
+
+async def increment_synced_video_watch(user_id: int) -> int:
+    """
+    Atomically increment the shared video watch counter for user_id (today IST).
+    If the stored date is a previous day, resets the counter to 1 first.
+    Returns the NEW total watched count after increment.
+    """
+    if not _db_ready:
+        return 0
+
+    today = _today_ist()
+    async with _write_lock:
+        try:
+            db = await _open_db()
+
+            async with db.execute(
+                "SELECT watched_count, reset_date FROM shared_video_watches WHERE user_id=?",
+                (user_id,)
+            ) as cur:
+                row = await cur.fetchone()
+
+            if row is None:
+                new_count = 1
+                await db.execute(
+                    "INSERT INTO shared_video_watches (user_id, watched_count, reset_date) "
+                    "VALUES (?, 1, ?)",
+                    (user_id, today)
+                )
+            elif row[1] != today:
+                new_count = 1
+                await db.execute(
+                    "UPDATE shared_video_watches SET watched_count=1, reset_date=? WHERE user_id=?",
+                    (today, user_id)
+                )
+            else:
+                new_count = row[0] + 1
+                await db.execute(
+                    "UPDATE shared_video_watches SET watched_count=watched_count+1 WHERE user_id=?",
+                    (user_id,)
+                )
+
+            await db.commit()
+            await db.close()
+            print(f"🎬 [SharedSync] Video watch #{new_count} recorded for uid={user_id} (date={today})")
+            return new_count
+        except Exception as e:
+            print(f"⚠️ [SharedSync] video watch write error uid={user_id}: {e}")
+            return 0
+
+
+async def reset_synced_video_watches(user_id: int):
+    """
+    Manually reset a user's shared video watch counter to 0.
+    Useful for admin commands or midnight cron cleanup.
+    """
+    if not _db_ready:
+        return
+    async with _write_lock:
+        try:
+            db = await _open_db()
+            await db.execute(
+                "UPDATE shared_video_watches SET watched_count=0, reset_date=? WHERE user_id=?",
+                (_today_ist(), user_id)
+            )
+            await db.commit()
+            await db.close()
+            print(f"🔄 [SharedSync] Video watch count reset for uid={user_id}")
+        except Exception as e:
+            print(f"⚠️ [SharedSync] video watch reset error uid={user_id}: {e}")
+
+
+async def get_total_synced_video_watches_today() -> int:
+    """Return total video watches across ALL users today (for admin stats)."""
+    if not _db_ready:
+        return 0
+    today = _today_ist()
+    try:
+        db = await _open_db()
+        async with db.execute(
+            "SELECT SUM(watched_count) FROM shared_video_watches WHERE reset_date=?", (today,)
+        ) as cur:
+            row = await cur.fetchone()
+        await db.close()
+        return row[0] or 0 if row else 0
+    except Exception as e:
+        print(f"⚠️ [SharedSync] total video watches error: {e}")
         return 0
 
 
