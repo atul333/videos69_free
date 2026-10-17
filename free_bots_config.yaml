@@ -58,9 +58,9 @@ bots:
     enabled: true
 
     mandatory_channel_1_id:   -1003833649347
-    mandatory_channel_1_link: "https://t.me/+HlVrYVAjn59mMzQ0"
+    mandatory_channel_1_link: "https://t.me/+4vOykznly3A3ZDQ0"
     mandatory_channel_2_id:   -1003990969576
-    mandatory_channel_2_link: "https://t.me/+gexvPfaCcUlhN2Fl"
+    mandatory_channel_2_link: "https://t.me/+n2PlG1Nv0XQ5NTRl"
 
     video_channel_id: -1003897950714
     video_channel_env: "CHANNEL_ID_1"
@@ -91,9 +91,9 @@ bots:
     enabled: true
 
     mandatory_channel_1_id:   -1003833649347
-    mandatory_channel_1_link: "https://t.me/+HlVrYVAjn59mMzQ0"
+    mandatory_channel_1_link: "https://t.me/+4vOykznly3A3ZDQ0"
     mandatory_channel_2_id:   -1003990969576
-    mandatory_channel_2_link: "https://t.me/+gexvPfaCcUlhN2Fl"
+    mandatory_channel_2_link: "https://t.me/+n2PlG1Nv0XQ5NTRl"
 
     video_channel_id: -1003897950714
     video_channel_env: "CHANNEL_ID_1"
@@ -124,9 +124,9 @@ bots:
     enabled: true
 
     mandatory_channel_1_id:   -1003833649347
-    mandatory_channel_1_link: "https://t.me/+HlVrYVAjn59mMzQ0"
+    mandatory_channel_1_link: "https://t.me/+4vOykznly3A3ZDQ0"
     mandatory_channel_2_id:   -1003990969576
-    mandatory_channel_2_link: "https://t.me/+gexvPfaCcUlhN2Fl"
+    mandatory_channel_2_link: "https://t.me/+n2PlG1Nv0XQ5NTRl"
 
     video_channel_id: -1003897950714
     video_channel_env: "CHANNEL_ID_1"
@@ -158,9 +158,9 @@ bots:
     enabled: true
 
     mandatory_channel_1_id:   -1003833649347
-    mandatory_channel_1_link: "https://t.me/+HlVrYVAjn59mMzQ0"
+    mandatory_channel_1_link: "https://t.me/+4vOykznly3A3ZDQ0"
     mandatory_channel_2_id:   -1003990969576
-    mandatory_channel_2_link: "https://t.me/+gexvPfaCcUlhN2Fl"
+    mandatory_channel_2_link: "https://t.me/+n2PlG1Nv0XQ5NTRl"
 
     video_channel_id: -1004364664918
     video_channel_env: "CHANNEL_ID_2"
@@ -191,9 +191,9 @@ bots:
     enabled: true
 
     mandatory_channel_1_id:   -1003833649347
-    mandatory_channel_1_link: "https://t.me/+HlVrYVAjn59mMzQ0"
+    mandatory_channel_1_link: "https://t.me/+4vOykznly3A3ZDQ0"
     mandatory_channel_2_id:   -1003990969576
-    mandatory_channel_2_link: "https://t.me/+gexvPfaCcUlhN2Fl"
+    mandatory_channel_2_link: "https://t.me/+n2PlG1Nv0XQ5NTRl"
 
     video_channel_id: -1004364664918
     video_channel_env: "CHANNEL_ID_2"
@@ -224,9 +224,9 @@ bots:
     enabled: true
 
     mandatory_channel_1_id:   -1003833649347
-    mandatory_channel_1_link: "https://t.me/+HlVrYVAjn59mMzQ0"
+    mandatory_channel_1_link: "https://t.me/+4vOykznly3A3ZDQ0"
     mandatory_channel_2_id:   -1003990969576
-    mandatory_channel_2_link: "https://t.me/+gexvPfaCcUlhN2Fl"
+    mandatory_channel_2_link: "https://t.me/+n2PlG1Nv0XQ5NTRl"
 
     video_channel_id: -1004364664918
     video_channel_env: "CHANNEL_ID_2"
@@ -258,9 +258,9 @@ bots:
     enabled: true
 
     mandatory_channel_1_id:   -1003833649347
-    mandatory_channel_1_link: "https://t.me/+HlVrYVAjn59mMzQ0"
+    mandatory_channel_1_link: "https://t.me/+4vOykznly3A3ZDQ0"
     mandatory_channel_2_id:   -1003990969576
-    mandatory_channel_2_link: "https://t.me/+gexvPfaCcUlhN2Fl"
+    mandatory_channel_2_link: "https://t.me/+n2PlG1Nv0XQ5NTRl"
 
     video_channel_id: -1003897950714
     video_channel_env: "CHANNEL_ID_1"
@@ -291,9 +291,9 @@ bots:
     enabled: true
 
     mandatory_channel_1_id:   -1003833649347
-    mandatory_channel_1_link: "https://t.me/+HlVrYVAjn59mMzQ0"
+    mandatory_channel_1_link: "https://t.me/+4vOykznly3A3ZDQ0"
     mandatory_channel_2_id:   -1003990969576
-    mandatory_channel_2_link: "https://t.me/+gexvPfaCcUlhN2Fl"
+    mandatory_channel_2_link: "https://t.me/+n2PlG1Nv0XQ5NTRl"
 
     video_channel_id: -1003897950714
     video_channel_env: "CHANNEL_ID_1"
@@ -324,9 +324,9 @@ bots:
     enabled: true
 
     mandatory_channel_1_id:   -1003833649347
-    mandatory_channel_1_link: "https://t.me/+HlVrYVAjn59mMzQ0"
+    mandatory_channel_1_link: "https://t.me/+4vOykznly3A3ZDQ0"
     mandatory_channel_2_id:   -1003990969576
-    mandatory_channel_2_link: "https://t.me/+gexvPfaCcUlhN2Fl"
+    mandatory_channel_2_link: "https://t.me/+n2PlG1Nv0XQ5NTRl"
 
     video_channel_id: -1003897950714
     video_channel_env: "CHANNEL_ID_1"
