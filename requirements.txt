@@ -2,7 +2,7 @@
 # Dependencies for the free-bot multi-runner system
 # Install: pip install -r requirements.txt
 
-python-telegram-bot==20.7
+python-telegram-bot>=20.8
 python-dotenv>=1.0.0
 aiosqlite>=0.20.0
 pyyaml>=6.0
