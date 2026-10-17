@@ -1,8 +1,12 @@
+# requirements.txt
+# Dependencies for the free-bot multi-runner system
+# Install: pip install -r requirements.txt
+
 python-telegram-bot==20.7
-python-dotenv==1.0.0
-aiohttp==3.9.1
-aiosqlite==0.20.0
-pytz==2024.1
-aiofiles==23.2.1
-# razorpay_payment.py uses only aiohttp + aiosqlite (already above) — no extra package needed
-Pillow==10.3.0
+python-dotenv>=1.0.0
+aiosqlite>=0.20.0
+pyyaml>=6.0
+
+# Testing
+pytest>=7.4
+pytest-asyncio>=0.23

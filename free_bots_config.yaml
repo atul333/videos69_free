@@ -1,0 +1,353 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# free_bots_config.yaml — Configuration for all 9 Free Bots
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# HOW TO USE
+# ──────────
+# 1. Copy .env.free_bots.example to .env and fill in BOT_1_TOKEN ... BOT_9_TOKEN
+# 2. Fill in the channel IDs and video channel info for each bot below
+# 3. Run:  python free_bot_runner.py
+#
+# TO ADD / REMOVE A BOT
+# ─────────────────────
+# • Enable/disable any bot instantly with  enabled: true/false
+# • To add a new bot: add its token to .env and add an entry below
+# • NO code changes required — only this file and .env change
+#
+# NOTES
+# ─────
+# • mandatory_channel_2_id is optional. If your bot only requires one channel,
+#   either omit it or set it equal to mandatory_channel_1_id.
+# • video_delay_seconds: enforced server-side; default 3 seconds.
+# • daily_video_limit: videos per user per day (resets midnight IST).
+# • membership_cache_ttl: seconds to cache membership check (default 300 = 5 min).
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Global defaults (applied to every bot unless overridden per-bot) ──────────
+settings:
+  db_path: "free_users.db"        # Shared DB file — one file for all 9 bots
+  daily_video_limit: 0            # 0 = Unlimited free videos (no daily limit)
+  video_delay_seconds: 3          # Server-side delay before delivering video
+  membership_cache_ttl: 300       # Seconds to cache membership check result
+  support_url: "https://t.me/videos69Admin_Bot"
+  default_promo_message: ""
+  default_promo_links:
+    - text: "🤖 @Videos69_A5_bot"
+      url: "https://t.me/Videos69_A5_bot"
+    - text: "🤖 @Videos69_B7_bot"
+      url: "https://t.me/Videos69_B7_bot"
+    - text: "🤖 @Videos69_D3_bot"
+      url: "https://t.me/Videos69_D3_bot"
+    - text: "🤖 @Videos69_B6_bot"
+      url: "https://t.me/Videos69_B6_bot"
+    - text: "🤖 @Videos69_B8_bot"
+      url: "https://t.me/Videos69_B8_bot"
+    - text: "🤖 @Videos69_B9_bot"
+      url: "https://t.me/Videos69_B9_bot"
+    - text: "🤖 @Videos69_A4_bot"
+      url: "https://t.me/Videos69_A4_bot"
+    - text: "🤖 @Videos69_A1_bot"
+      url: "https://t.me/Videos69_A1_bot"
+
+# ── Bot definitions ────────────────────────────────────────────────────────────
+bots:
+
+  # ── Channel 1 Group: Bots 1, 2, 3 (-1003897950714) ───────────────────────────
+  - name: "Free Videos Bot 1"
+    token_env: "BOT_1_TOKEN"       # Env var name holding this bot's token
+    enabled: true
+
+    mandatory_channel_1_id:   -1003833649347
+    mandatory_channel_1_link: "https://t.me/+HlVrYVAjn59mMzQ0"
+    mandatory_channel_2_id:   -1003990969576
+    mandatory_channel_2_link: "https://t.me/+gexvPfaCcUlhN2Fl"
+
+    video_channel_id: -1003897950714
+    video_channel_env: "CHANNEL_ID_1"
+    min_message_id: 1
+    max_message_id: 13839
+
+    promo_message: ""
+    promo_links:
+      - text: "🤖 @Videos69_A5_bot"
+        url: "https://t.me/Videos69_A5_bot"
+      - text: "🤖 @Videos69_B7_bot"
+        url: "https://t.me/Videos69_B7_bot"
+      - text: "🤖 @Videos69_D3_bot"
+        url: "https://t.me/Videos69_D3_bot"
+      - text: "🤖 @Videos69_B6_bot"
+        url: "https://t.me/Videos69_B6_bot"
+      - text: "🤖 @Videos69_B8_bot"
+        url: "https://t.me/Videos69_B8_bot"
+      - text: "🤖 @Videos69_B9_bot"
+        url: "https://t.me/Videos69_B9_bot"
+      - text: "🤖 @Videos69_A4_bot"
+        url: "https://t.me/Videos69_A4_bot"
+      - text: "🤖 @Videos69_A1_bot"
+        url: "https://t.me/Videos69_A1_bot"
+
+  - name: "Free Videos Bot 2"
+    token_env: "BOT_2_TOKEN"
+    enabled: true
+
+    mandatory_channel_1_id:   -1003833649347
+    mandatory_channel_1_link: "https://t.me/+HlVrYVAjn59mMzQ0"
+    mandatory_channel_2_id:   -1003990969576
+    mandatory_channel_2_link: "https://t.me/+gexvPfaCcUlhN2Fl"
+
+    video_channel_id: -1003897950714
+    video_channel_env: "CHANNEL_ID_1"
+    min_message_id: 1
+    max_message_id: 13839
+
+    promo_message: ""
+    promo_links:
+      - text: "🤖 @Videos69_A5_bot"
+        url: "https://t.me/Videos69_A5_bot"
+      - text: "🤖 @Videos69_B7_bot"
+        url: "https://t.me/Videos69_B7_bot"
+      - text: "🤖 @Videos69_D3_bot"
+        url: "https://t.me/Videos69_D3_bot"
+      - text: "🤖 @Videos69_B6_bot"
+        url: "https://t.me/Videos69_B6_bot"
+      - text: "🤖 @Videos69_B8_bot"
+        url: "https://t.me/Videos69_B8_bot"
+      - text: "🤖 @Videos69_B9_bot"
+        url: "https://t.me/Videos69_B9_bot"
+      - text: "🤖 @Videos69_A4_bot"
+        url: "https://t.me/Videos69_A4_bot"
+      - text: "🤖 @Videos69_A1_bot"
+        url: "https://t.me/Videos69_A1_bot"
+
+  - name: "Free Videos Bot 3"
+    token_env: "BOT_3_TOKEN"
+    enabled: true
+
+    mandatory_channel_1_id:   -1003833649347
+    mandatory_channel_1_link: "https://t.me/+HlVrYVAjn59mMzQ0"
+    mandatory_channel_2_id:   -1003990969576
+    mandatory_channel_2_link: "https://t.me/+gexvPfaCcUlhN2Fl"
+
+    video_channel_id: -1003897950714
+    video_channel_env: "CHANNEL_ID_1"
+    min_message_id: 1
+    max_message_id: 13839
+
+    promo_message: ""
+    promo_links:
+      - text: "🤖 @Videos69_A5_bot"
+        url: "https://t.me/Videos69_A5_bot"
+      - text: "🤖 @Videos69_B7_bot"
+        url: "https://t.me/Videos69_B7_bot"
+      - text: "🤖 @Videos69_D3_bot"
+        url: "https://t.me/Videos69_D3_bot"
+      - text: "🤖 @Videos69_B6_bot"
+        url: "https://t.me/Videos69_B6_bot"
+      - text: "🤖 @Videos69_B8_bot"
+        url: "https://t.me/Videos69_B8_bot"
+      - text: "🤖 @Videos69_B9_bot"
+        url: "https://t.me/Videos69_B9_bot"
+      - text: "🤖 @Videos69_A4_bot"
+        url: "https://t.me/Videos69_A4_bot"
+      - text: "🤖 @Videos69_A1_bot"
+        url: "https://t.me/Videos69_A1_bot"
+
+  # ── Channel 2 Group: Bots 4, 5, 6 (-1004364664918) ───────────────────────────
+  - name: "Free Videos Bot 4"
+    token_env: "BOT_4_TOKEN"
+    enabled: true
+
+    mandatory_channel_1_id:   -1003833649347
+    mandatory_channel_1_link: "https://t.me/+HlVrYVAjn59mMzQ0"
+    mandatory_channel_2_id:   -1003990969576
+    mandatory_channel_2_link: "https://t.me/+gexvPfaCcUlhN2Fl"
+
+    video_channel_id: -1004364664918
+    video_channel_env: "CHANNEL_ID_2"
+    min_message_id: 1
+    max_message_id: 13839
+
+    promo_message: ""
+    promo_links:
+      - text: "🤖 @Videos69_A5_bot"
+        url: "https://t.me/Videos69_A5_bot"
+      - text: "🤖 @Videos69_B7_bot"
+        url: "https://t.me/Videos69_B7_bot"
+      - text: "🤖 @Videos69_D3_bot"
+        url: "https://t.me/Videos69_D3_bot"
+      - text: "🤖 @Videos69_B6_bot"
+        url: "https://t.me/Videos69_B6_bot"
+      - text: "🤖 @Videos69_B8_bot"
+        url: "https://t.me/Videos69_B8_bot"
+      - text: "🤖 @Videos69_B9_bot"
+        url: "https://t.me/Videos69_B9_bot"
+      - text: "🤖 @Videos69_A4_bot"
+        url: "https://t.me/Videos69_A4_bot"
+      - text: "🤖 @Videos69_A1_bot"
+        url: "https://t.me/Videos69_A1_bot"
+
+  - name: "Free Videos Bot 5"
+    token_env: "BOT_5_TOKEN"
+    enabled: true
+
+    mandatory_channel_1_id:   -1003833649347
+    mandatory_channel_1_link: "https://t.me/+HlVrYVAjn59mMzQ0"
+    mandatory_channel_2_id:   -1003990969576
+    mandatory_channel_2_link: "https://t.me/+gexvPfaCcUlhN2Fl"
+
+    video_channel_id: -1004364664918
+    video_channel_env: "CHANNEL_ID_2"
+    min_message_id: 1
+    max_message_id: 13839
+
+    promo_message: ""
+    promo_links:
+      - text: "🤖 @Videos69_A5_bot"
+        url: "https://t.me/Videos69_A5_bot"
+      - text: "🤖 @Videos69_B7_bot"
+        url: "https://t.me/Videos69_B7_bot"
+      - text: "🤖 @Videos69_D3_bot"
+        url: "https://t.me/Videos69_D3_bot"
+      - text: "🤖 @Videos69_B6_bot"
+        url: "https://t.me/Videos69_B6_bot"
+      - text: "🤖 @Videos69_B8_bot"
+        url: "https://t.me/Videos69_B8_bot"
+      - text: "🤖 @Videos69_B9_bot"
+        url: "https://t.me/Videos69_B9_bot"
+      - text: "🤖 @Videos69_A4_bot"
+        url: "https://t.me/Videos69_A4_bot"
+      - text: "🤖 @Videos69_A1_bot"
+        url: "https://t.me/Videos69_A1_bot"
+
+  - name: "Free Videos Bot 6"
+    token_env: "BOT_6_TOKEN"
+    enabled: true
+
+    mandatory_channel_1_id:   -1003833649347
+    mandatory_channel_1_link: "https://t.me/+HlVrYVAjn59mMzQ0"
+    mandatory_channel_2_id:   -1003990969576
+    mandatory_channel_2_link: "https://t.me/+gexvPfaCcUlhN2Fl"
+
+    video_channel_id: -1004364664918
+    video_channel_env: "CHANNEL_ID_2"
+    min_message_id: 1
+    max_message_id: 13839
+
+    promo_message: ""
+    promo_links:
+      - text: "🤖 @Videos69_A5_bot"
+        url: "https://t.me/Videos69_A5_bot"
+      - text: "🤖 @Videos69_B7_bot"
+        url: "https://t.me/Videos69_B7_bot"
+      - text: "🤖 @Videos69_D3_bot"
+        url: "https://t.me/Videos69_D3_bot"
+      - text: "🤖 @Videos69_B6_bot"
+        url: "https://t.me/Videos69_B6_bot"
+      - text: "🤖 @Videos69_B8_bot"
+        url: "https://t.me/Videos69_B8_bot"
+      - text: "🤖 @Videos69_B9_bot"
+        url: "https://t.me/Videos69_B9_bot"
+      - text: "🤖 @Videos69_A4_bot"
+        url: "https://t.me/Videos69_A4_bot"
+      - text: "🤖 @Videos69_A1_bot"
+        url: "https://t.me/Videos69_A1_bot"
+
+  # ── Channel 1 Group: Bots 7, 8, 9 (-1003897950714) ───────────────────────────
+  - name: "Free Videos Bot 7"
+    token_env: "BOT_7_TOKEN"
+    enabled: true
+
+    mandatory_channel_1_id:   -1003833649347
+    mandatory_channel_1_link: "https://t.me/+HlVrYVAjn59mMzQ0"
+    mandatory_channel_2_id:   -1003990969576
+    mandatory_channel_2_link: "https://t.me/+gexvPfaCcUlhN2Fl"
+
+    video_channel_id: -1003897950714
+    video_channel_env: "CHANNEL_ID_1"
+    min_message_id: 1
+    max_message_id: 13839
+
+    promo_message: ""
+    promo_links:
+      - text: "🤖 @Videos69_A5_bot"
+        url: "https://t.me/Videos69_A5_bot"
+      - text: "🤖 @Videos69_B7_bot"
+        url: "https://t.me/Videos69_B7_bot"
+      - text: "🤖 @Videos69_D3_bot"
+        url: "https://t.me/Videos69_D3_bot"
+      - text: "🤖 @Videos69_B6_bot"
+        url: "https://t.me/Videos69_B6_bot"
+      - text: "🤖 @Videos69_B8_bot"
+        url: "https://t.me/Videos69_B8_bot"
+      - text: "🤖 @Videos69_B9_bot"
+        url: "https://t.me/Videos69_B9_bot"
+      - text: "🤖 @Videos69_A4_bot"
+        url: "https://t.me/Videos69_A4_bot"
+      - text: "🤖 @Videos69_A1_bot"
+        url: "https://t.me/Videos69_A1_bot"
+
+  - name: "Free Videos Bot 8"
+    token_env: "BOT_8_TOKEN"
+    enabled: true
+
+    mandatory_channel_1_id:   -1003833649347
+    mandatory_channel_1_link: "https://t.me/+HlVrYVAjn59mMzQ0"
+    mandatory_channel_2_id:   -1003990969576
+    mandatory_channel_2_link: "https://t.me/+gexvPfaCcUlhN2Fl"
+
+    video_channel_id: -1003897950714
+    video_channel_env: "CHANNEL_ID_1"
+    min_message_id: 1
+    max_message_id: 13839
+
+    promo_message: ""
+    promo_links:
+      - text: "🤖 @Videos69_A5_bot"
+        url: "https://t.me/Videos69_A5_bot"
+      - text: "🤖 @Videos69_B7_bot"
+        url: "https://t.me/Videos69_B7_bot"
+      - text: "🤖 @Videos69_D3_bot"
+        url: "https://t.me/Videos69_D3_bot"
+      - text: "🤖 @Videos69_B6_bot"
+        url: "https://t.me/Videos69_B6_bot"
+      - text: "🤖 @Videos69_B8_bot"
+        url: "https://t.me/Videos69_B8_bot"
+      - text: "🤖 @Videos69_B9_bot"
+        url: "https://t.me/Videos69_B9_bot"
+      - text: "🤖 @Videos69_A4_bot"
+        url: "https://t.me/Videos69_A4_bot"
+      - text: "🤖 @Videos69_A1_bot"
+        url: "https://t.me/Videos69_A1_bot"
+
+  - name: "Free Videos Bot 9"
+    token_env: "BOT_9_TOKEN"
+    enabled: true
+
+    mandatory_channel_1_id:   -1003833649347
+    mandatory_channel_1_link: "https://t.me/+HlVrYVAjn59mMzQ0"
+    mandatory_channel_2_id:   -1003990969576
+    mandatory_channel_2_link: "https://t.me/+gexvPfaCcUlhN2Fl"
+
+    video_channel_id: -1003897950714
+    video_channel_env: "CHANNEL_ID_1"
+    min_message_id: 1
+    max_message_id: 13839
+
+    promo_message: ""
+    promo_links:
+      - text: "🤖 @Videos69_A5_bot"
+        url: "https://t.me/Videos69_A5_bot"
+      - text: "🤖 @Videos69_B7_bot"
+        url: "https://t.me/Videos69_B7_bot"
+      - text: "🤖 @Videos69_D3_bot"
+        url: "https://t.me/Videos69_D3_bot"
+      - text: "🤖 @Videos69_B6_bot"
+        url: "https://t.me/Videos69_B6_bot"
+      - text: "🤖 @Videos69_B8_bot"
+        url: "https://t.me/Videos69_B8_bot"
+      - text: "🤖 @Videos69_B9_bot"
+        url: "https://t.me/Videos69_B9_bot"
+      - text: "🤖 @Videos69_A4_bot"
+        url: "https://t.me/Videos69_A4_bot"
+      - text: "🤖 @Videos69_A1_bot"
+        url: "https://t.me/Videos69_A1_bot"
