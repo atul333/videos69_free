@@ -156,6 +156,15 @@ async def _delete_video_job(ctx: ContextTypes.DEFAULT_TYPE):
         pass  # already deleted or expired — silently ignore
 
 
+async def _delete_video_after(bot, chat_id: int, message_id: int, delay: int = 600):
+    """Delete a video message after delay seconds (works without PTB job-queue)."""
+    try:
+        await asyncio.sleep(delay)
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+
+
 DEFAULT_PREMIUM_BOTS = [
     {"text": "🤖 @Videos69_A5_bot", "url": "https://t.me/Videos69_A5_bot"},
     {"text": "🤖 @Videos69_B7_bot", "url": "https://t.me/Videos69_B7_bot"},
@@ -282,27 +291,48 @@ async def _deliver_video(ctx: ContextTypes.DEFAULT_TYPE, cfg: dict,
             )
 
             # Record AFTER successful send — prevents duplicate increments
-            new_daily, new_total = db.record_video_delivered(user_id, video_id)
+            try:
+                new_daily, new_total = db.record_video_delivered(user_id, video_id)
+                logger.info("[%s] Video %s delivered to uid=%s (daily=%d total=%d)",
+                            cfg["name"], video_id, user_id, new_daily, new_total)
+            except Exception as e:
+                logger.warning("[%s] record_video_delivered error: %s", cfg["name"], e)
 
-            logger.info("[%s] Video %s delivered to uid=%s (daily=%d total=%d)",
-                        cfg["name"], video_id, user_id, new_daily, new_total)
-
-            # Schedule 10-minute deletion (no persistent registry — simpler)
-            ctx.job_queue.run_once(
-                _delete_video_job,
-                when=600,
-                data={"chat_id": chat_id, "message_id": video_msg.message_id},
-                name=f"del_{chat_id}_{video_msg.message_id}",
-            )
+            # Schedule 10-minute deletion (safe: works with or without PTB job-queue)
+            try:
+                if getattr(ctx, "job_queue", None) is not None:
+                    ctx.job_queue.run_once(
+                        _delete_video_job,
+                        when=600,
+                        data={"chat_id": chat_id, "message_id": video_msg.message_id},
+                        name=f"del_{chat_id}_{video_msg.message_id}",
+                    )
+                else:
+                    asyncio.create_task(
+                        _delete_video_after(ctx.bot, chat_id, video_msg.message_id, 600),
+                        name=f"del_{chat_id}_{video_msg.message_id}",
+                    )
+            except Exception:
+                try:
+                    asyncio.create_task(
+                        _delete_video_after(ctx.bot, chat_id, video_msg.message_id, 600),
+                        name=f"del_{chat_id}_{video_msg.message_id}",
+                    )
+                except Exception:
+                    pass
 
             # Fire promotion milestones (non-blocking task — never delays delivery)
-            milestones = db.check_and_claim_milestones(user_id)
-            for m in milestones:
-                asyncio.create_task(
-                    _send_milestone_promo(ctx, cfg, chat_id, user_id, m),
-                    name=f"promo_{user_id}_{m}",
-                )
+            try:
+                milestones = db.check_and_claim_milestones(user_id)
+                for m in milestones:
+                    asyncio.create_task(
+                        _send_milestone_promo(ctx, cfg, chat_id, user_id, m),
+                        name=f"promo_{user_id}_{m}",
+                    )
+            except Exception as e:
+                logger.warning("[%s] milestone check error: %s", cfg["name"], e)
 
+            # Video delivered successfully — return immediately, NEVER repeat loop!
             return True
 
         except Exception as e:

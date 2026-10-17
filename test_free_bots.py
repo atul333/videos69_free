@@ -1103,3 +1103,43 @@ async def test_25_broadcast_feature(_fresh_db):
     await cancel_broadcast_command(admin_update, ctx)
     assert ctx.bot_data["_broadcast_cancel"] is True
     assert "Stopping active broadcast worker" in admin_update.message.reply_text.call_args[0][0]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TEST 26 — Single Video Delivery Even When job_queue is None
+# ══════════════════════════════════════════════════════════════════════════════
+@pytest.mark.asyncio
+async def test_26_single_video_delivery_without_job_queue(_fresh_db):
+    """
+    Ensure that when ctx.job_queue is None (server environment without apscheduler),
+    calling button_callback('next_video') delivers EXACTLY ONE video, and does NOT
+    loop to deliver multiple videos.
+    """
+    from free_bot_core import button_callback
+
+    db_module, _ = _fresh_db
+    await db_module.init_db()
+
+    cfg = _make_cfg({"video_delay_seconds": 0})
+    ctx = _make_context(cfg)
+    ctx.job_queue = None  # Simulates environment where job_queue is not present
+
+    user_id = 98765
+    db_module.get_or_create_user(user_id, "SingleTester")
+
+    # Mock member check as True
+    m = MagicMock()
+    m.status = "member"
+    ctx.bot.get_chat_member.return_value = m
+    ctx.bot.copy_message.return_value = MagicMock(message_id=123)
+
+    update = MagicMock()
+    update.callback_query = _make_callback_query(user_id, "next_video")
+
+    await button_callback(update, ctx)
+
+    # Must be called EXACTLY ONCE
+    assert ctx.bot.copy_message.call_count == 1
+    u = db_module.get_user(user_id)
+    assert u["daily_count"] == 1
+    assert u["total_delivered"] == 1
