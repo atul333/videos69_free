@@ -39,7 +39,9 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.error import RetryAfter, Forbidden, TelegramError
 from telegram.request import HTTPXRequest
+from typing import List, Optional
 
 import free_users_db as db
 
@@ -975,81 +977,257 @@ async def admin_help_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"🎬 `/content` — Top liked/disliked videos & length preferences\n"
         f"🎯 `/plan` — Data-driven future plans & actionable advice\n"
         f"👤 `/user <id>` — Deep dive into any user's watch history\n"
-        f"📣 `/broadcast` — Send an announcement message to all users"
+        f"📣 `/broadcast` — Send broadcast to this bot's users (`/broadcast all` for all bots)\n"
+        f"🛑 `/cancel_broadcast` — Stop an active running broadcast"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
-# ── Broadcast (admin only, simple version) ────────────────────────────────────
+# ── Broadcast (Admin only, non-blocking background worker) ────────────────────
 
 _BROADCAST_WAITING = 1
+# Pacing: ~22 msgs/sec. Telegram hard ceiling is 30 msg/sec global.
+# Yielding control via asyncio.sleep(0.045) ensures live user clicks & commands
+# are processed concurrently with ZERO lag or hanging.
+BROADCAST_INTERVAL_SECONDS = 0.045
+
+
+async def _run_broadcast_worker(
+    bot,
+    from_chat_id: int,
+    message_id: int,
+    admin_chat_id: int,
+    status_message_id: int,
+    user_ids: List[int],
+    bot_data: dict,
+    scope_name: str,
+):
+    """
+    Background worker for broadcasting promotions.
+    Runs asynchronously decoupled from the command handler to prevent bot hanging.
+    Handles Telegram rate limits (429 RetryAfter) with backoff.
+    Throttles status edits to keep admin informed while complying with Telegram edit limits.
+    """
+    bot_data["_broadcast_running"] = True
+    bot_data["_broadcast_cancel"] = False
+
+    total = len(user_ids)
+    sent = 0
+    blocked = 0
+    failed = 0
+    start_time = _time.monotonic()
+    last_edit = _time.monotonic()
+
+    logger.info("Broadcast worker started: %d target users (%s)", total, scope_name)
+
+    try:
+        for idx, uid in enumerate(user_ids, 1):
+            if bot_data.get("_broadcast_cancel", False):
+                logger.info("Broadcast worker cancelled by admin at %d/%d", idx, total)
+                break
+
+            retries = 0
+            while retries < 2:
+                try:
+                    await bot.copy_message(
+                        chat_id=uid,
+                        from_chat_id=from_chat_id,
+                        message_id=message_id,
+                    )
+                    sent += 1
+                    break
+                except RetryAfter as e:
+                    # Telegram rate limit FloodWait: pause and retry this user
+                    wait_sec = int(e.retry_after) + 1
+                    logger.warning("Telegram FloodWait hit during broadcast: sleeping %ds", wait_sec)
+                    await asyncio.sleep(wait_sec)
+                    retries += 1
+                except Forbidden:
+                    # User blocked the bot or account deleted
+                    blocked += 1
+                    break
+                except TelegramError as e:
+                    failed += 1
+                    break
+                except Exception:
+                    failed += 1
+                    break
+
+            # Rate limiting interval: ~22 msgs/sec.
+            # Crucially: asyncio.sleep yields control to the event loop so live users
+            # clicking Next or sending /start have ZERO lag!
+            await asyncio.sleep(BROADCAST_INTERVAL_SECONDS)
+
+            # Periodically update status message (every 5 seconds)
+            now = _time.monotonic()
+            if now - last_edit >= 5.0 or idx == total:
+                elapsed = max(1, int(now - start_time))
+                pct = int((idx / total) * 100) if total else 0
+                speed = round(idx / elapsed, 1)
+                try:
+                    await bot.edit_message_text(
+                        chat_id=admin_chat_id,
+                        message_id=status_message_id,
+                        text=(
+                            f"⏳ *Broadcast in Progress...* (`{pct}%`)\n\n"
+                            f"🎯 Target ({scope_name}): `{total}` users\n"
+                            f"📬 Delivered: `{sent}`\n"
+                            f"🚫 Blocked/Left: `{blocked}`\n"
+                            f"⚠️ Other Errors: `{failed}`\n"
+                            f"⚡ Pace: `{speed}` msgs/sec (safe under 30/s)\n"
+                            f"⏱ Elapsed: `{elapsed}s`\n\n"
+                            f"🛡️ *Live User Traffic:* 100% active with zero lag.\n"
+                            f"🛑 Send `/cancel_broadcast` to stop early."
+                        ),
+                        parse_mode="Markdown",
+                    )
+                    last_edit = now
+                except Exception:
+                    pass
+
+    finally:
+        elapsed = max(1, int(_time.monotonic() - start_time))
+        was_cancelled = bot_data.get("_broadcast_cancel", False)
+        bot_data["_broadcast_running"] = False
+        bot_data["_broadcast_cancel"] = False
+
+        title = "🛑 *Broadcast Stopped Early*" if was_cancelled else "🎉 *Broadcast Completed Successfully!*"
+        avg_speed = round((sent + blocked + failed) / elapsed, 1)
+        final_text = (
+            f"{title}\n\n"
+            f"🎯 Target Audience: `{total}` ({scope_name})\n"
+            f"📬 Delivered: `{sent}`\n"
+            f"🚫 Blocked / Inactive: `{blocked}`\n"
+            f"⚠️ Failed: `{failed}`\n"
+            f"⏱ Time Elapsed: `{elapsed}s`\n"
+            f"⚡ Avg Delivery Pace: `{avg_speed}` msgs/sec"
+        )
+        try:
+            await bot.edit_message_text(
+                chat_id=admin_chat_id,
+                message_id=status_message_id,
+                text=final_text,
+                parse_mode="Markdown",
+            )
+        except Exception:
+            try:
+                await bot.send_message(
+                    chat_id=admin_chat_id,
+                    text=final_text,
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
 
 
 async def broadcast_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Admin-only: /broadcast — enter broadcast mode."""
+    """Admin-only: /broadcast [all] — enter broadcast mode."""
     cfg = _cfg(ctx)
     if not _is_admin(update.effective_user.id, cfg):
         await update.message.reply_text("⛔ Not authorized.")
         return ConversationHandler.END
 
+    if ctx.bot_data.get("_broadcast_running", False):
+        await update.message.reply_text(
+            "⚠️ A broadcast is already running on this bot!\n"
+            "Use `/cancel_broadcast` to stop it before starting another."
+        )
+        return ConversationHandler.END
+
+    # Check scope from argument: /broadcast all vs /broadcast
+    is_all = ctx.args and ctx.args[0].lower() == "all"
+    scope = "all" if is_all else "bot"
+    ctx.user_data["broadcast_scope"] = scope
+
+    if scope == "all":
+        count = len(db.get_all_user_ids())
+        target_desc = f"**ALL users across all 9 bots** ({count} users)"
+    else:
+        count = len(db.get_bot_user_ids(cfg["name"]))
+        target_desc = f"**users of {cfg['name']}** ({count} users)\n_(Tip: Use `/broadcast all` to message users of all 9 bots)_"
+
     await update.message.reply_text(
-        "📣 *Broadcast Mode*\n\n"
-        "Send the message you want to broadcast to this bot's users.\n"
-        "You can send text, photo, video, or any media.\n\n"
-        "Send /cancel to abort.",
+        f"📣 *Broadcast Promotional Mode*\n\n"
+        f"Target Audience: {target_desc}\n\n"
+        f"Please send the message you wish to broadcast.\n"
+        f"Supports text, photo, video, captions, or any media format.\n\n"
+        f"⚡ *Performance Guarantee:* Broadcast operates in a rate-limited background worker (~22 msgs/sec).\n"
+        f"Live users will experience zero lag or hanging.\n\n"
+        f"Send `/cancel` to abort.",
         parse_mode="Markdown",
     )
     return _BROADCAST_WAITING
 
 
 async def broadcast_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Cancel broadcast conversation."""
-    await update.message.reply_text("❌ Broadcast cancelled.")
+    """Cancel broadcast setup conversation."""
+    await update.message.reply_text("❌ Broadcast setup cancelled.")
     return ConversationHandler.END
 
 
+async def cancel_broadcast_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Admin-only: /cancel_broadcast or /stop_broadcast — stops an active broadcast worker."""
+    cfg = _cfg(ctx)
+    if not _is_admin(update.effective_user.id, cfg):
+        await update.message.reply_text("⛔ Not authorized.")
+        return
+
+    if not ctx.bot_data.get("_broadcast_running", False):
+        await update.message.reply_text("ℹ️ No active broadcast is currently running.")
+        return
+
+    ctx.bot_data["_broadcast_cancel"] = True
+    await update.message.reply_text("🛑 Stopping active broadcast worker... The current delivery will finalize shortly.")
+
+
 async def handle_broadcast_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Admin-only: receive the broadcast message and forward to all this bot's users."""
+    """Admin-only: receive promotional message and launch asynchronous background worker."""
     cfg = _cfg(ctx)
     if not _is_admin(update.effective_user.id, cfg):
         return ConversationHandler.END
 
-    message  = update.message
-    user_ids = db.get_bot_user_ids(cfg["name"])
-    total    = len(user_ids)
-
-    if not total:
-        await message.reply_text("⚠️ No users registered with this bot yet.")
+    if ctx.bot_data.get("_broadcast_running", False):
+        await update.message.reply_text("⚠️ A broadcast is already actively running on this bot.")
         return ConversationHandler.END
 
-    status = await message.reply_text(
-        f"⏳ Broadcasting to *{total}* users… Please wait.",
+    message = update.message
+    scope = ctx.user_data.get("broadcast_scope", "bot")
+
+    if scope == "all":
+        user_ids = db.get_all_user_ids()
+        scope_name = "All 9 Bots"
+    else:
+        user_ids = db.get_bot_user_ids(cfg["name"])
+        scope_name = cfg["name"]
+
+    total = len(user_ids)
+    if not total:
+        await message.reply_text(f"⚠️ No users registered under {scope_name} yet.")
+        return ConversationHandler.END
+
+    status_msg = await message.reply_text(
+        f"🚀 *Broadcast Launched in Background!*\n\n"
+        f"👥 Target Audience: `{total}` users ({scope_name})\n"
+        f"⚡ Pacing: ~22 msgs/sec (safe under 30 msg/s Telegram ceiling)\n"
+        f"🛡️ *Live User Traffic:* Fully unaffected with zero lag\n"
+        f"🛑 Send `/cancel_broadcast` at any time to halt.\n\n"
+        f"Delivery starting now...",
         parse_mode="Markdown",
     )
 
-    sent = 0
-    failed = 0
-    for uid in user_ids:
-        try:
-            await ctx.bot.copy_message(
-                chat_id=uid,
-                from_chat_id=message.chat_id,
-                message_id=message.message_id,
-            )
-            sent += 1
-            await asyncio.sleep(0.05)  # 20 msg/sec — under Telegram limit
-        except Exception:
-            failed += 1
-
-    try:
-        await status.edit_text(
-            f"✅ *Broadcast Complete!*\n\n"
-            f"📬 Sent: `{sent}`\n"
-            f"❌ Failed: `{failed}`",
-            parse_mode="Markdown",
+    # Spawn background worker so handler returns immediately and update loop never hangs
+    asyncio.create_task(
+        _run_broadcast_worker(
+            bot=ctx.bot,
+            from_chat_id=message.chat_id,
+            message_id=message.message_id,
+            admin_chat_id=message.chat_id,
+            status_message_id=status_msg.message_id,
+            user_ids=user_ids,
+            bot_data=ctx.bot_data,
+            scope_name=scope_name,
         )
-    except Exception:
-        pass
+    )
 
     return ConversationHandler.END
 
@@ -1103,6 +1281,8 @@ def build_application(cfg: dict) -> Application:
     app.add_handler(CommandHandler("plan", plan_command))
     app.add_handler(CommandHandler("user", user_detail_command))
     app.add_handler(CommandHandler("admin", admin_help_command))
+    app.add_handler(CommandHandler("cancel_broadcast", cancel_broadcast_command))
+    app.add_handler(CommandHandler("stop_broadcast", cancel_broadcast_command))
 
     # Broadcast conversation (admin only, group=-1 for priority)
     broadcast_conv = ConversationHandler(

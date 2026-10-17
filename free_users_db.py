@@ -595,6 +595,11 @@ def get_bot_user_ids(bot_name: str) -> List[int]:
     return list(_bot_reg.get(bot_name, set()))
 
 
+def get_all_user_ids() -> List[int]:
+    """Return all user IDs across all bots from shared cache. Zero I/O."""
+    return list(_cache.keys())
+
+
 # ── Statistics ────────────────────────────────────────────────────────────────
 
 def get_stats() -> Dict[str, Any]:

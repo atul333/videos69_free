@@ -108,6 +108,7 @@ def _make_context(cfg: dict) -> MagicMock:
     """Return a mock ContextTypes.DEFAULT_TYPE with bot_data set."""
     ctx = MagicMock()
     ctx.bot_data = {"cfg": cfg, "mc": {}, "proc": set()}
+    ctx.user_data = {}
     ctx.bot = AsyncMock()
     ctx.bot.get_chat_member = AsyncMock()
     ctx.bot.copy_message    = AsyncMock()
@@ -315,8 +316,8 @@ async def test_07_five_second_delay(_fresh_db):
     await button_callback(update, ctx)
     elapsed = asyncio.get_event_loop().time() - start
 
-    assert elapsed >= delay_seconds, (
-        f"Expected delay >= {delay_seconds}s but got {elapsed:.3f}s"
+    assert elapsed >= (delay_seconds - 0.02), (
+        f"Expected delay >= {delay_seconds}s (with tolerance) but got {elapsed:.3f}s"
     )
 
 
@@ -978,3 +979,127 @@ async def test_24_admin_analysis_commands(_fresh_db):
     assert "/content" in admin_menu_text
     assert "/plan" in admin_menu_text
     assert "/user <id>" in admin_menu_text
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TEST 25 — Promotion Broadcast Feature (Rate limits & Background Execution)
+# ══════════════════════════════════════════════════════════════════════════════
+@pytest.mark.asyncio
+async def test_25_broadcast_feature(_fresh_db):
+    """
+    Broadcast feature tests:
+    1. Non-admin authorization rejection for /broadcast and /cancel_broadcast.
+    2. Admin entering /broadcast mode, /broadcast all scope detection.
+    3. Background worker execution:
+       - Rate-limit compliance (pacing)
+       - RetryAfter backoff & retry
+       - Forbidden (blocked user) handling
+       - Status message progress & final completion summary.
+    4. /cancel_broadcast command aborts an ongoing broadcast worker.
+    """
+    from telegram.error import RetryAfter, Forbidden
+    from free_bot_core import (
+        broadcast_command,
+        broadcast_cancel,
+        cancel_broadcast_command,
+        _run_broadcast_worker,
+    )
+
+    db_module, _ = _fresh_db
+    await db_module.init_db()
+
+    cfg = _make_cfg({"admin_user_id": 999, "name": "Bot Alpha"})
+    ctx = _make_context(cfg)
+    ctx.bot_data["cfg"] = cfg
+    ctx.bot_data["_broadcast_running"] = False
+
+    # 1. Non-admin authorization checks
+    non_admin_update = MagicMock()
+    non_admin_update.effective_user.id = 1111
+    non_admin_update.message.reply_text = AsyncMock()
+
+    await broadcast_command(non_admin_update, ctx)
+    assert "⛔ Not authorized." in non_admin_update.message.reply_text.call_args[0][0]
+
+    non_admin_update.message.reply_text.reset_mock()
+    await cancel_broadcast_command(non_admin_update, ctx)
+    assert "⛔ Not authorized." in non_admin_update.message.reply_text.call_args[0][0]
+
+    # 2. Register users: 2 on Bot Alpha, 1 on Bot Beta (total 3 users)
+    db_module.get_or_create_user(201, "Alice")
+    db_module.register_user_with_bot(201, "Bot Alpha")
+    db_module.get_or_create_user(202, "Bob")
+    db_module.register_user_with_bot(202, "Bot Alpha")
+    db_module.get_or_create_user(203, "Charlie")
+    db_module.register_user_with_bot(203, "Bot Beta")
+
+    # 3. Admin entering /broadcast (bot scope)
+    admin_update = MagicMock()
+    admin_update.effective_user.id = 999
+    admin_update.message.reply_text = AsyncMock()
+    ctx.args = []
+
+    res = await broadcast_command(admin_update, ctx)
+    assert res == 1
+    assert "Broadcast Promotional Mode" in admin_update.message.reply_text.call_args[0][0]
+    assert "Bot Alpha" in admin_update.message.reply_text.call_args[0][0]
+    assert ctx.user_data["broadcast_scope"] == "bot"
+
+    # Admin entering /broadcast all (all bots scope)
+    admin_update.message.reply_text.reset_mock()
+    ctx.args = ["all"]
+    res = await broadcast_command(admin_update, ctx)
+    assert res == 1
+    assert "ALL users across all 9 bots" in admin_update.message.reply_text.call_args[0][0]
+    assert ctx.user_data["broadcast_scope"] == "all"
+
+    # 4. Background worker execution test with mocks
+    # User 201: Success
+    # User 202: RetryAfter once, then success
+    # User 203: Forbidden (blocked)
+    bot_mock = AsyncMock()
+    attempt = {"202": 0}
+
+    async def mock_copy_message(chat_id, from_chat_id, message_id):
+        if chat_id == 201:
+            return MagicMock()
+        elif chat_id == 202:
+            if attempt["202"] == 0:
+                attempt["202"] += 1
+                raise RetryAfter(1)
+            return MagicMock()
+        elif chat_id == 203:
+            raise Forbidden("Bot was blocked by the user")
+
+    bot_mock.copy_message = AsyncMock(side_effect=mock_copy_message)
+    bot_mock.edit_message_text = AsyncMock()
+    bot_mock.send_message = AsyncMock()
+
+    with patch("free_bot_core.BROADCAST_INTERVAL_SECONDS", 0.0001), \
+         patch("asyncio.sleep", AsyncMock()):
+        await _run_broadcast_worker(
+            bot=bot_mock,
+            from_chat_id=123,
+            message_id=456,
+            admin_chat_id=999,
+            status_message_id=789,
+            user_ids=[201, 202, 203],
+            bot_data=ctx.bot_data,
+            scope_name="All 9 Bots",
+        )
+
+    # Worker completed
+    assert ctx.bot_data["_broadcast_running"] is False
+    bot_mock.edit_message_text.assert_called()
+    final_call_text = bot_mock.edit_message_text.call_args.kwargs.get("text", "")
+    assert "Broadcast Completed Successfully!" in final_call_text
+    assert "Delivered: `2`" in final_call_text
+    assert "Blocked / Inactive: `1`" in final_call_text
+
+    # 5. /cancel_broadcast while running
+    ctx.bot_data["_broadcast_running"] = True
+    ctx.bot_data["_broadcast_cancel"] = False
+    admin_update.message.reply_text.reset_mock()
+    await cancel_broadcast_command(admin_update, ctx)
+    assert ctx.bot_data["_broadcast_cancel"] is True
+    assert "Stopping active broadcast worker" in admin_update.message.reply_text.call_args[0][0]

@@ -137,11 +137,25 @@ This minimises Telegram API usage during the delay.
 
 | Command | Description |
 |---|---|
-| `/stats` | Live stats: users, active today, videos delivered |
-| `/broadcast` | Send a message to all users of THIS bot |
-| `/cancel` | Cancel a pending broadcast |
+| `/admin` | Show admin command dashboard |
+| `/stats` | Live numbers: users, active today, videos delivered, likes/dislikes |
+| `/analytics` (or `/behaviour`) | Customer behaviour, retention cohorts & conversion funnel |
+| `/content` | Top liked/disliked videos & length preferences |
+| `/plan` | Data-driven future plans & actionable advice |
+| `/user <id>` | Deep dive into any user's watch history |
+| `/broadcast` | Send promotional message to this bot's users |
+| `/broadcast all` | Send promotional message to ALL users across all 9 bots |
+| `/cancel_broadcast` | Stop an active background broadcast worker |
+| `/cancel` | Cancel broadcast setup conversation |
 
 Only the `ADMIN_USER_ID` from `.env` can use these.
+
+### Promotional Broadcast Architecture (Telegram Rate Limits & Live User Protection)
+- **Telegram Rate Limits**: Telegram enforces a global limit of 30 msgs/sec per bot. Broadcast messages are paced at ~22 msgs/sec (`0.045s` interval), remaining comfortably below the ceiling.
+- **Automatic FloodWait Backoff**: If Telegram returns a 429 `RetryAfter` error, the worker pauses for the exact duration requested by Telegram plus 1 second, then retries the user without dropping or failing.
+- **Zero Live-User Lag**: The broadcast executes inside a background asyncio worker (`asyncio.create_task`). On every delivery iteration, `await asyncio.sleep(...)` yields control to Python's asyncio event loop, allowing incoming live user interactions (video delivery, Next button, `/start`) to execute immediately with zero hanging or latency.
+- **Real-Time Progress & Throttled Edits**: To respect Telegram's message-edit limits, status messages are edited every 5 seconds with live counts (delivered, blocked, errors, speed). A final completion report is delivered when done.
+- **Early Cancellation**: Admins can stop an in-progress broadcast at any moment with `/cancel_broadcast`.
 
 ---
 
