@@ -1143,3 +1143,42 @@ async def test_26_single_video_delivery_without_job_queue(_fresh_db):
     u = db_module.get_user(user_id)
     assert u["daily_count"] == 1
     assert u["total_delivered"] == 1
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TEST 27 — Get Video buttons remain reusable (not disabled after 1 click)
+# ══════════════════════════════════════════════════════════════════════════════
+@pytest.mark.asyncio
+async def test_27_get_video_button_reusable_not_disabled(_fresh_db):
+    """
+    Ensure that 'Get Video' / 'Get First Video' buttons (callback_data='get_video')
+    are NOT disabled after 1 click. Users can click them multiple times to receive videos.
+    Only the 'Next Video' button on video messages is single-click disabled.
+    """
+    from free_bot_core import button_callback
+
+    db_module, _ = _fresh_db
+    await db_module.init_db()
+
+    user_id = 554433
+    db_module.get_or_create_user(user_id, "GetVideoUser")
+
+    cfg = _make_cfg({"video_delay_seconds": 0, "max_message_id": 50})
+    ctx = _make_context(cfg)
+    m = MagicMock()
+    m.status = "member"
+    ctx.bot.get_chat_member.return_value = m
+    ctx.bot.copy_message.return_value = MagicMock(message_id=888)
+
+    update = MagicMock()
+    update.callback_query = _make_callback_query(user_id, "get_video", chat_id=2000)
+    update.callback_query.message.message_id = 100
+
+    # First click: delivers video
+    await button_callback(update, ctx)
+    assert ctx.bot.copy_message.call_count == 1
+
+    # Second click on the same 'Get Video' button message:
+    await button_callback(update, ctx)
+    # copy_message SHOULD be called again (not disabled)!
+    assert ctx.bot.copy_message.call_count == 2

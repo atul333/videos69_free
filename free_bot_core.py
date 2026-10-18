@@ -67,6 +67,28 @@ def _used_buttons(ctx: ContextTypes.DEFAULT_TYPE) -> set:
     return ctx.bot_data.setdefault("used_next_buttons", set())
 
 
+def _is_next_video_button(query, data: str) -> bool:
+    """
+    Check if the clicked button is specifically the '▶️ Next Video' button under a video.
+    Single-click disable protection applies ONLY to this button.
+    It does NOT apply to 'Get Video', 'Get First Video', 'Try Again', 'Continue Watching', etc.
+    """
+    if data != "next_video":
+        return False
+    msg = getattr(query, "message", None)
+    if msg and getattr(msg, "reply_markup", None):
+        keyboard = getattr(msg.reply_markup, "inline_keyboard", None)
+        if keyboard and isinstance(keyboard, (list, tuple)):
+            for row in keyboard:
+                if isinstance(row, (list, tuple)):
+                    for btn in row:
+                        if getattr(btn, "callback_data", None) == data:
+                            text = getattr(btn, "text", "")
+                            if isinstance(text, str) and any(kw in text.lower() for kw in ("get", "first", "try", "continue")):
+                                return False
+    return True
+
+
 # ── Mandatory channel membership ──────────────────────────────────────────────
 
 def _join_keyboard(cfg: dict, r1: bool, r2: bool) -> InlineKeyboardMarkup:
@@ -391,7 +413,7 @@ async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "🎥 Free videos: *Unlimited* 🔥\n"
             "🍿 Watch as many videos as you want anytime!\n\n"
         )
-    keyboard = [[InlineKeyboardButton("🎬 Get First Video", callback_data="next_video")]]
+    keyboard = [[InlineKeyboardButton("🎬 Get First Video", callback_data="get_video")]]
 
     await update.message.reply_text(
         f"🎬 *Welcome to {cfg['name']}!* 🎬\n\n"
@@ -411,7 +433,7 @@ async def help_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     keyboard   = []
     if cfg.get("support_url"):
         keyboard.append([InlineKeyboardButton("💬 Contact Support", url=cfg["support_url"])])
-    keyboard.append([InlineKeyboardButton("🎬 Get Video", callback_data="next_video")])
+    keyboard.append([InlineKeyboardButton("🎬 Get Video", callback_data="get_video")])
 
     daily_limit = cfg.get("daily_video_limit", 0)
     limit_desc  = (
@@ -477,7 +499,7 @@ async def button_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup(
                         [[InlineKeyboardButton("🎬 Get First Video",
-                                               callback_data="next_video")]]
+                                               callback_data="get_video")]]
                     ),
                 )
             except Exception as e:
@@ -530,17 +552,19 @@ async def button_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 logger.debug("[%s] edit_reply_markup: %s", cfg["name"], e)
         return
 
-    # ── next_video ────────────────────────────────────────────────────────────
-    if data == "next_video":
+    # ── next_video / get_video ────────────────────────────────────────────────
+    if data in ("next_video", "get_video"):
         proc = _proc(ctx)
         used = _used_buttons(ctx)
 
         msg = query.message
         btn_key = (msg.chat_id, msg.message_id) if msg else None
+        is_next_btn = _is_next_video_button(query, data)
 
-        # 1. Single-click enforcement: this button can only be clicked 1 time.
-        # Once clicked, it is disabled without making any extra Telegram API requests.
-        if btn_key and btn_key in used:
+        # 1. Single-click enforcement: ONLY for the "▶️ Next Video" button under videos!
+        # Once clicked, that specific button is disabled.
+        # This NEVER disables "Get Video", "Get First Video", "Try Again", etc.
+        if is_next_btn and btn_key and btn_key in used:
             try:
                 await query.answer(
                     text="⚠️ Button already used! Please use the Next button on your latest video.",
@@ -561,8 +585,8 @@ async def button_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 pass
             return
 
-        # Mark this button as consumed immediately (click only 1 time)
-        if btn_key:
+        # Mark this button as consumed immediately ONLY if it's the "▶️ Next Video" button
+        if is_next_btn and btn_key:
             used.add(btn_key)
             if len(used) > 50_000:
                 used.clear()
@@ -626,7 +650,7 @@ async def button_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     for link in cfg.get("promo_links", []):
                         keyboard.append([InlineKeyboardButton(link["text"], url=link["url"])])
                     keyboard.append([InlineKeyboardButton(
-                        "🔄 Try Again Tomorrow", callback_data="next_video"
+                        "🔄 Try Again Tomorrow", callback_data="get_video"
                     )])
 
                     promo_section = ""
@@ -658,7 +682,7 @@ async def button_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     chat_id=query.message.chat_id,
                     text="⚠️ No videos available right now. Please try again!",
                     reply_markup=InlineKeyboardMarkup(
-                        [[InlineKeyboardButton("🔄 Try Again", callback_data="next_video")]]
+                        [[InlineKeyboardButton("🔄 Try Again", callback_data="get_video")]]
                     ),
                 )
 
@@ -670,7 +694,7 @@ async def button_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     chat_id=query.message.chat_id,
                     text="❌ Something went wrong. Please try again.",
                     reply_markup=InlineKeyboardMarkup(
-                        [[InlineKeyboardButton("🔄 Try Again", callback_data="next_video")]]
+                        [[InlineKeyboardButton("🔄 Try Again", callback_data="get_video")]]
                     ),
                 )
             except Exception:
@@ -718,7 +742,7 @@ async def handle_text_messages(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Handle plain text messages — redirect to get a video."""
     if not update.effective_user:
         return
-    keyboard = [[InlineKeyboardButton("🎬 Get Video", callback_data="next_video")]]
+    keyboard = [[InlineKeyboardButton("🎬 Get Video", callback_data="get_video")]]
     try:
         await update.message.reply_text(
             "Tap the button below to get a video! 🎬",
